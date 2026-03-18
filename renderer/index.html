@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src http://127.0.0.1:* blob:;">
+  <title>2026 Music Player</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="fatal-error" class="fatal-error" style="display:none;"></div>
+  <div class="app">
+    <header class="header">
+      <div class="header-top">
+        <h1 class="app-title">2026 Music Player</h1>
+        <div class="header-actions">
+          <button type="button" id="open-download-folder-btn" class="btn-secondary" title="Open download folder">Open download folder</button>
+        </div>
+      </div>
+      <div class="magnet-input">
+        <textarea id="magnet-input" placeholder="Paste magnet link (magnet:?xt=urn:btih:...)" rows="1"></textarea>
+        <button id="add-torrent-btn" type="button" class="btn-primary">Add torrent</button>
+      </div>
+      <div id="add-status" class="add-status" aria-live="polite"></div>
+    </header>
+
+    <main class="main">
+      <section class="torrents-section">
+        <h2 class="section-title">Torrents</h2>
+        <ul id="torrent-list" class="torrent-list"></ul>
+      </section>
+
+      <section class="files-section">
+        <h2 class="section-title">Tracks</h2>
+        <div class="files-section-header">
+          <p id="files-hint" class="hint">Select a torrent to see its files.</p>
+          <button type="button" id="open-torrent-folder-btn" class="btn-secondary btn-open-folder" title="Open folder for selected torrent" style="display: none;">Open folder</button>
+        </div>
+        <ul id="file-list" class="file-list"></ul>
+      </section>
+    </main>
+
+    <footer class="now-playing-bar">
+      <div class="now-playing-info">
+        <div class="now-playing-cover"></div>
+        <div class="now-playing-meta">
+          <div id="now-playing" class="now-playing-title"></div>
+          <span id="track-position" class="track-position"></span>
+        </div>
+      </div>
+      <div class="now-playing-controls">
+        <div class="playback-buttons">
+          <button type="button" id="btn-prev" class="btn-icon" title="Previous track">Prev</button>
+          <button type="button" id="btn-next" class="btn-icon" title="Next track">Next</button>
+        </div>
+        <div class="media-container">
+          <audio id="audio-player" controls crossorigin="anonymous"></audio>
+          <video id="video-player" controls crossorigin="anonymous" style="display: none;"></video>
+        </div>
+      </div>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
