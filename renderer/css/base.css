@@ -1,0 +1,302 @@
+/* ============================================================================
+   BASE — reset, typography defaults, shared primitives (buttons, chips, meters)
+   ========================================================================= */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: var(--line-normal);
+  color: var(--color-text-primary);
+  background: var(--color-bg-app);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol,
+figure {
+  margin: 0;
+  padding: 0;
+}
+
+/* The UA's `[hidden] { display: none }` loses to any component rule that sets
+   display, which is most of them here. Rows hidden by the track filter, the
+   fullscreen button and the tracklist header all depend on this winning. */
+[hidden] {
+  display: none !important;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* Focus: visible only for keyboard, never removed without a replacement. */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* Anything showing a live number gets tabular figures — at 2 Hz the difference
+   between "live" and "twitching" is entirely glyph-width jitter. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* ---- buttons ------------------------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  height: 32px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.btn:disabled {
+  background: var(--color-bg-active);
+  color: var(--color-text-disabled);
+  box-shadow: none;
+  pointer-events: none;
+}
+
+.btn--primary {
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+}
+.btn--primary:hover {
+  background: var(--color-accent-hover);
+}
+.btn--primary:active {
+  background: var(--color-accent-active);
+}
+
+.btn--secondary {
+  background: var(--color-bg-surface-raised);
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.btn--secondary:hover {
+  background: var(--color-bg-active);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+.btn--ghost:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.btn--danger {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+.btn--danger:hover {
+  background: var(--color-danger);
+  color: var(--color-text-on-accent);
+}
+
+.btn--block {
+  width: 100%;
+}
+
+/* icon-only button */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+.icon-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+.icon-btn[aria-pressed='true'] {
+  color: var(--color-accent);
+}
+.icon-btn:disabled {
+  color: var(--color-text-disabled);
+  pointer-events: none;
+}
+.icon-btn svg {
+  width: 17px;
+  height: 17px;
+  display: block;
+}
+
+/* ---- chips -------------------------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  background: var(--color-bg-active);
+  color: var(--color-text-tertiary);
+}
+.chip--accent {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-hover);
+}
+
+/* ---- eyebrow / section label ------------------------------------------- */
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+/* ---- meter (progress bar) ----------------------------------------------
+   Driven by a --fill custom property and scaleX so updates are compositor-only.
+   Animating `width` would force layout twice a second, per row. */
+
+.meter {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--color-meter-track);
+}
+
+.meter__fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  transform: scaleX(var(--fill, 0));
+  background: var(--color-meter-fill);
+  transition: transform var(--duration-slow) linear;
+}
+
+.meter.is-done .meter__fill {
+  background: var(--color-success);
+}
+
+/* ---- reduced motion -----------------------------------------------------
+   Zeroing the duration *tokens* is what makes this apply app-wide; the
+   blanket override below catches keyframe animations declared elsewhere. */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 1ms;
+    --duration-base: 1ms;
+    --duration-slow: 1ms;
+    --duration-slower: 1ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --color-border-subtle: rgba(255, 255, 255, 0.18);
+    --color-border: rgba(255, 255, 255, 0.3);
+    --color-text-tertiary: var(--color-text-secondary);
+  }
+}
+
+/* ---- scrollbars --------------------------------------------------------- */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-disabled);
+  background-clip: content-box;
+}

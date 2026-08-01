@@ -1,0 +1,111 @@
+/* ============================================================================
+   PRIMITIVES — theme-independent raw values.
+   Themes map these onto the semantic --color-* tokens. Component CSS must
+   never reference anything in this file directly.
+   ========================================================================= */
+
+:root {
+  /* -- neutral ramp: hue 240, ~4% saturation. Never pure black: a true neutral
+        dark gray reads warm and muddy next to a blue accent on a P3 display. */
+  --mp-gray-950: #0d0d0f;
+  --mp-gray-900: #131316;
+  --mp-gray-850: #17171b;
+  --mp-gray-800: #1c1c21;
+  --mp-gray-750: #232329;
+  --mp-gray-700: #2b2b32;
+  --mp-gray-600: #3a3a43;
+  --mp-gray-500: #55555f;
+  --mp-gray-400: #7c7c88;
+  --mp-gray-300: #a1a1ad;
+  --mp-gray-200: #c8c8d0;
+  --mp-gray-100: #e6e6ea;
+  --mp-gray-050: #f5f5f7;
+  --mp-white: #ffffff;
+
+  /* -- accent: desaturated blue. The old #3b82f6 sits at ~92% saturation,
+        which glares on a dark surface. */
+  --mp-accent-200: #c3d6f3;
+  --mp-accent-300: #9dbcec;
+  --mp-accent-400: #7aa2e3;
+  --mp-accent-500: #5b87c9;
+  --mp-accent-600: #4a6fa8;
+  --mp-accent-700: #3a5784;
+
+  /* -- status, desaturated to match */
+  --mp-green-400: #6fba90;
+  --mp-green-500: #4ea172;
+  --mp-amber-500: #c9973f;
+  --mp-red-400: #e08a86;
+  --mp-red-500: #d9615c;
+  --mp-red-600: #b84a46;
+
+  /* -- type: minor third (1.200) from a 16px base */
+  --font-size-xs: 0.8125rem;   /* 13px  — metadata, counts, chips */
+  --font-size-sm: 0.9375rem;   /* 15px  — dense secondary UI */
+  --font-size-md: 1rem;        /* 16px  — BODY MINIMUM: track titles, primary text */
+  --font-size-lg: 1.2rem;      /* 19.2px — torrent title */
+  --font-size-xl: 1.44rem;     /* 23px  — section heading */
+  --font-size-2xl: 1.728rem;   /* 27.6px — empty-state headline */
+
+  --line-tight: 1.2;
+  --line-snug: 1.35;
+  --line-normal: 1.5;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.07em;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* -- spacing: 4px base */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 20px;
+  --space-7: 24px;
+  --space-8: 32px;
+  --space-9: 40px;
+  --space-10: 48px;
+  --space-11: 64px;
+  --space-12: 80px;
+
+  /* -- radii */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+
+  /* -- motion */
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 280ms;
+  --duration-slower: 420ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+
+  /* -- elevation */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
+
+  /* -- layout dimensions */
+  --sidebar-width: 264px;
+  --titlebar-height: 52px;
+  --transport-height: 82px;
+  --row-height-track: 44px;
+  --row-height-torrent: 54px;
+  --artwork-transport: 52px;
+  --artwork-header: 96px;
+  --content-max: 1100px;
+}

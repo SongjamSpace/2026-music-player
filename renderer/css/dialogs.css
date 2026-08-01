@@ -1,0 +1,273 @@
+/* ============================================================================
+   DIALOGS — native <dialog> + showModal(): free focus trap, free Esc,
+   free ::backdrop, free focus restore, and it all works on file://.
+   ========================================================================= */
+
+dialog {
+  padding: 0;
+  border: 0;
+  color: var(--color-text-primary);
+  background: var(--color-bg-surface-raised);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg), inset 0 0 0 1px var(--color-border);
+  max-width: min(560px, calc(100vw - var(--space-10)));
+  width: 100%;
+}
+
+dialog::backdrop {
+  background: var(--color-bg-scrim);
+  backdrop-filter: blur(2px);
+}
+
+dialog[open] {
+  animation: dialog-in var(--duration-base) var(--ease-emphasized);
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+}
+
+.dialog__head {
+  padding: var(--space-6) var(--space-7) var(--space-4);
+}
+
+.dialog__title {
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+
+.dialog__body {
+  padding: 0 var(--space-7) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.dialog__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-7) var(--space-6);
+  border-top: 1px solid var(--color-separator);
+}
+
+.dialog__hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: var(--line-normal);
+}
+
+.dialog__hint.is-error {
+  color: var(--color-danger);
+}
+
+/* ---- form primitives ---------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field__label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.field textarea,
+.field input[type='text'] {
+  width: 100%;
+  padding: var(--space-4);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-input);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  line-height: var(--line-normal);
+  resize: vertical;
+  user-select: text;
+}
+
+.field textarea:focus-visible,
+.field input[type='text']:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--color-focus);
+}
+
+.field textarea::placeholder {
+  font-family: var(--font-sans);
+  color: var(--color-text-tertiary);
+}
+
+/* ---- settings ----------------------------------------------------------- */
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--color-separator);
+}
+
+.settings-group:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.settings-group__label {
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.theme-picker {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.theme-swatch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  cursor: default;
+  transition: box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.theme-swatch:hover {
+  box-shadow: inset 0 0 0 1px var(--color-border-strong);
+}
+
+.theme-swatch:has(input:checked) {
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+}
+
+.theme-swatch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.theme-swatch__preview {
+  width: 84px;
+  height: 50px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--color-border-subtle);
+}
+
+.theme-swatch__name {
+  font-size: var(--font-size-xs);
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.theme-swatch:has(input:checked) .theme-swatch__name {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+}
+
+.setting-row__text {
+  min-width: 0;
+}
+
+.setting-row__title {
+  font-size: var(--font-size-sm);
+}
+
+.setting-row__desc {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: var(--line-normal);
+}
+
+.setting-row__value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  word-break: break-all;
+  user-select: text;
+}
+
+/* switch */
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-active);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+  transition: transform var(--duration-base) var(--ease-emphasized);
+}
+
+.switch[aria-checked='true'] {
+  background: var(--color-accent);
+}
+
+.switch[aria-checked='true']::after {
+  transform: translateX(16px);
+  background: var(--color-text-on-accent);
+}
+
+/* ---- shortcuts sheet ---------------------------------------------------- */
+
+.shortcuts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-3) var(--space-7);
+}
+
+.shortcuts__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.shortcuts__row span:first-child {
+  color: var(--color-text-secondary);
+}
+
+kbd {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  padding: 1px var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--color-bg-active);
+  color: var(--color-text-primary);
+  white-space: nowrap;
+}

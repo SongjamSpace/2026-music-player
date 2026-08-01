@@ -7,7 +7,12 @@
     "start": "electron .",
     "dev": "electron ."
   },
-  "keywords": ["music", "player", "torrent", "webtorrent"],
+  "keywords": [
+    "music",
+    "player",
+    "torrent",
+    "webtorrent"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
@@ -15,6 +20,7 @@
   },
   "dependencies": {
     "electron-store": "^8.1.0",
+    "music-metadata": "^7.14.0",
     "webtorrent": "^1.8.0"
   }
 }

@@ -1,0 +1,302 @@
+/* ============================================================================
+   TRANSPORT — the now-playing bar.
+
+   The ONLY glassmorphic surface in the app. Blur is used here because the bar
+   floats over content that keeps scrolling behind it: the translucency says
+   "this layer is temporary, the content behind it still exists". Applying it
+   anywhere else would make it decoration.
+   ========================================================================= */
+
+.transport {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  height: var(--transport-height);
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(360px, 2fr) minmax(180px, 1fr);
+  align-items: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-6);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-top: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-transport);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .transport {
+    background: var(--color-bg-surface-raised);
+  }
+}
+
+/* ---- left: now playing -------------------------------------------------- */
+
+.np {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.np .artwork {
+  width: var(--artwork-transport);
+  height: var(--artwork-transport);
+  border-radius: var(--radius-sm);
+}
+
+.np__meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.np__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+.np__sub,
+.np__pos {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.np__pos {
+  font-variant-numeric: tabular-nums;
+}
+
+.transport.is-idle .np__title {
+  color: var(--color-text-tertiary);
+}
+
+/* ---- center: controls + scrubber ---------------------------------------- */
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  width: 100%;
+}
+
+.controls__buttons {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.btn-play {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+  color: var(--color-bg-app);
+  transition: transform var(--duration-fast) var(--ease-spring),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+.btn-play:hover {
+  transform: scale(1.06);
+}
+
+.btn-play:active {
+  transform: scale(0.96);
+}
+
+.btn-play:disabled {
+  background: var(--color-text-disabled);
+  pointer-events: none;
+}
+
+.btn-play svg {
+  width: 17px;
+  height: 17px;
+}
+
+.controls__seek {
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+}
+
+.time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
+}
+
+.time--start {
+  text-align: right;
+}
+
+/* ---- scrubber -----------------------------------------------------------
+   A styled native <input type="range">: free keyboard support, free slider
+   semantics, free pointer capture. The buffered underlay can't live inside the
+   input, so the layers sit in a wrapper driven by two custom properties. */
+
+.scrubber {
+  position: relative;
+  height: 18px;
+  display: flex;
+  align-items: center;
+}
+
+.scrubber__track,
+.scrubber__buffered,
+.scrubber__played {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: var(--radius-full);
+  pointer-events: none;
+}
+
+.scrubber__track {
+  background: var(--color-scrubber-track);
+}
+
+.scrubber__buffered {
+  background: var(--color-scrubber-buffered);
+  transform-origin: left center;
+  transform: scaleX(var(--buffered, 0));
+  transition: transform var(--duration-slow) linear;
+}
+
+.scrubber__played {
+  background: var(--color-scrubber-fill);
+  transform-origin: left center;
+  transform: scaleX(var(--played, 0));
+}
+
+.scrubber input[type='range'] {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  margin: 0;
+  background: none;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+}
+
+.scrubber input[type='range']::-webkit-slider-runnable-track {
+  height: 18px;
+  background: transparent;
+}
+
+.scrubber input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 3.5px;
+  border-radius: var(--radius-full);
+  background: var(--color-scrubber-thumb);
+  box-shadow: var(--shadow-xs);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.scrubber:hover input[type='range']::-webkit-slider-thumb,
+.scrubber input[type='range']:focus-visible::-webkit-slider-thumb,
+.scrubber.is-scrubbing input[type='range']::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+.scrubber input[type='range']:disabled {
+  pointer-events: none;
+}
+
+.scrubber input[type='range']:focus-visible {
+  box-shadow: none;
+}
+
+.scrubber:focus-within .scrubber__track {
+  box-shadow: 0 0 0 2px var(--color-focus);
+}
+
+/* ---- right: status + volume --------------------------------------------- */
+
+.transport__right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.status-chip {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-chip.is-error {
+  color: var(--color-danger);
+}
+
+.status-chip.is-buffering {
+  color: var(--color-warning);
+}
+
+.volume {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.volume input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 74px;
+  height: 16px;
+  margin: 0;
+  background: none;
+}
+
+.volume input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(
+    to right,
+    var(--color-scrubber-fill) calc(var(--vol, 0.8) * 100%),
+    var(--color-scrubber-track) calc(var(--vol, 0.8) * 100%)
+  );
+}
+
+.volume input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -3px;
+  border-radius: var(--radius-full);
+  background: var(--color-scrubber-thumb);
+  box-shadow: var(--shadow-xs);
+}
+
+/* Narrower windows: drop the right cluster's volume slider before anything else. */
+@media (max-width: 1000px) {
+  .volume input[type='range'] {
+    display: none;
+  }
+  .status-chip {
+    max-width: 120px;
+  }
+}

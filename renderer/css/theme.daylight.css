@@ -1,0 +1,123 @@
+/* ============================================================================
+   THEME: Daylight (light)
+
+   Exists to prove the theme seam is real — every rule here is a token
+   redefinition, no component CSS is touched. `unhinged` will be the same shape.
+   ========================================================================= */
+
+[data-theme='daylight'] {
+  color-scheme: light;
+
+  --color-bg-app: var(--mp-gray-050);
+  --color-bg-sidebar: #ececef;
+  --color-bg-content: var(--mp-gray-050);
+  --color-bg-surface: var(--mp-white);
+  --color-bg-surface-raised: var(--mp-white);
+  --color-bg-hover: rgba(0, 0, 0, 0.04);
+  --color-bg-active: rgba(0, 0, 0, 0.07);
+  --color-bg-selected: rgba(0, 0, 0, 0.075);
+  --color-bg-input: var(--mp-white);
+  --color-bg-scrim: rgba(0, 0, 0, 0.28);
+  --color-bg-skeleton: rgba(0, 0, 0, 0.055);
+  --color-bg-skeleton-sheen: rgba(0, 0, 0, 0.095);
+
+  --color-text-primary: #16161a;      /* 16.4:1 */
+  --color-text-secondary: #4a4a55;    /*  8.6:1 */
+  --color-text-tertiary: #6a6a76;     /*  5.3:1 */
+  --color-text-disabled: #9a9aa6;
+  --color-text-on-accent: var(--mp-white);
+  --color-text-link: var(--mp-accent-700);
+
+  --color-border-subtle: rgba(0, 0, 0, 0.07);
+  --color-border: rgba(0, 0, 0, 0.12);
+  --color-border-strong: rgba(0, 0, 0, 0.24);
+  --color-separator: rgba(0, 0, 0, 0.07);
+
+  --color-accent: var(--mp-accent-700);    /* 5.6:1 on the light surface */
+  --color-accent-hover: var(--mp-accent-600);
+  --color-accent-active: #2f4a72;
+  --color-accent-subtle: rgba(58, 87, 132, 0.12);
+  --color-focus: var(--mp-accent-600);
+  --color-success: #2f7d52;
+  --color-warning: #8a6414;
+  --color-danger: #b03a35;
+  --color-danger-hover: #942f2b;
+  --color-danger-subtle: rgba(176, 58, 53, 0.1);
+
+  --color-track-playing-text: var(--mp-accent-700);
+  --color-scrubber-track: rgba(0, 0, 0, 0.12);
+  --color-scrubber-buffered: rgba(0, 0, 0, 0.24);
+  --color-scrubber-fill: var(--color-text-primary);
+  --color-scrubber-thumb: var(--color-text-primary);
+  --color-meter-track: rgba(0, 0, 0, 0.1);
+  --color-meter-fill: var(--color-accent);
+  --color-artwork-sat: 42%;
+  --color-artwork-light: 62%;
+
+  --glass-bg: rgba(248, 248, 250, 0.72);
+  --glass-blur: 20px;
+  --glass-saturate: 180%;
+  --glass-border: rgba(0, 0, 0, 0.1);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.16);
+  --shadow-transport: 0 -1px 0 var(--glass-border), 0 -12px 32px rgba(0, 0, 0, 0.1);
+  --focus-ring: 0 0 0 2px var(--color-bg-app), 0 0 0 4px var(--color-focus);
+}
+
+/* `auto` follows the OS. Same token block, selected by media query. */
+@media (prefers-color-scheme: light) {
+  [data-theme='auto'] {
+    color-scheme: light;
+
+    --color-bg-app: var(--mp-gray-050);
+    --color-bg-sidebar: #ececef;
+    --color-bg-content: var(--mp-gray-050);
+    --color-bg-surface: var(--mp-white);
+    --color-bg-surface-raised: var(--mp-white);
+    --color-bg-hover: rgba(0, 0, 0, 0.04);
+    --color-bg-active: rgba(0, 0, 0, 0.07);
+    --color-bg-selected: rgba(0, 0, 0, 0.075);
+    --color-bg-input: var(--mp-white);
+    --color-bg-scrim: rgba(0, 0, 0, 0.28);
+    --color-bg-skeleton: rgba(0, 0, 0, 0.055);
+    --color-bg-skeleton-sheen: rgba(0, 0, 0, 0.095);
+
+    --color-text-primary: #16161a;
+    --color-text-secondary: #4a4a55;
+    --color-text-tertiary: #6a6a76;
+    --color-text-disabled: #9a9aa6;
+    --color-text-link: var(--mp-accent-700);
+
+    --color-border-subtle: rgba(0, 0, 0, 0.07);
+    --color-border: rgba(0, 0, 0, 0.12);
+    --color-border-strong: rgba(0, 0, 0, 0.24);
+    --color-separator: rgba(0, 0, 0, 0.07);
+
+    --color-accent: var(--mp-accent-700);
+    --color-accent-hover: var(--mp-accent-600);
+    --color-accent-active: #2f4a72;
+    --color-accent-subtle: rgba(58, 87, 132, 0.12);
+    --color-focus: var(--mp-accent-600);
+    --color-success: #2f7d52;
+    --color-warning: #8a6414;
+    --color-danger: #b03a35;
+    --color-danger-hover: #942f2b;
+    --color-danger-subtle: rgba(176, 58, 53, 0.1);
+
+    --color-track-playing-text: var(--mp-accent-700);
+    --color-scrubber-track: rgba(0, 0, 0, 0.12);
+    --color-scrubber-buffered: rgba(0, 0, 0, 0.24);
+    --color-scrubber-fill: var(--color-text-primary);
+    --color-scrubber-thumb: var(--color-text-primary);
+    --color-meter-track: rgba(0, 0, 0, 0.1);
+    --color-artwork-sat: 42%;
+    --color-artwork-light: 62%;
+
+    --glass-bg: rgba(248, 248, 250, 0.72);
+    --glass-border: rgba(0, 0, 0, 0.1);
+    --shadow-transport: 0 -1px 0 var(--glass-border), 0 -12px 32px rgba(0, 0, 0, 0.1);
+  }
+}

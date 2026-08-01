@@ -1,0 +1,288 @@
+/* ============================================================================
+   TORRENT HEADER + TRACK LIST
+   ========================================================================= */
+
+/* ---- torrent header ----------------------------------------------------- */
+
+.torrent-header {
+  display: grid;
+  grid-template-columns: var(--artwork-header) 1fr;
+  gap: var(--space-6);
+  margin-bottom: var(--space-8);
+}
+
+.artwork {
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    145deg,
+    hsl(var(--art-hue, 220) var(--color-artwork-sat) var(--color-artwork-light)),
+    hsl(calc(var(--art-hue, 220) + 48) var(--color-artwork-sat)
+      calc(var(--color-artwork-light) * 0.6))
+  );
+  box-shadow: var(--shadow-sm);
+  display: grid;
+  place-items: center;
+  color: var(--color-text-primary);
+  flex: 0 0 auto;
+}
+
+.artwork {
+  position: relative;
+  overflow: hidden;
+}
+
+.artwork svg {
+  width: 40%;
+  height: 40%;
+  opacity: 0.55;
+}
+
+.artwork__img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: art-in var(--duration-slow) var(--ease-standard);
+}
+
+@keyframes art-in {
+  from { opacity: 0; }
+}
+
+/* The generated gradient is only a placeholder for real cover art. */
+.artwork.has-image {
+  background: var(--color-bg-surface);
+}
+
+.artwork.has-image svg {
+  display: none;
+}
+
+
+.torrent-header .artwork {
+  width: var(--artwork-header);
+  height: var(--artwork-header);
+}
+
+.torrent-header__body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  gap: var(--space-3);
+}
+
+.torrent-header__title {
+  font-size: var(--font-size-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--line-tight);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.torrent-header__meta {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.torrent-header__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.torrent-header__meter {
+  grid-column: 1 / -1;
+  height: 3px;
+  margin-top: var(--space-2);
+}
+
+.torrent-header__meter[hidden] {
+  display: none;
+}
+
+/* ---- track list --------------------------------------------------------- */
+
+.tracklist {
+  --track-grid: 40px 1fr 92px 104px 36px;
+}
+
+.tracklist__head {
+  display: grid;
+  grid-template-columns: var(--track-grid);
+  align-items: center;
+  gap: var(--space-4);
+  position: sticky;
+  top: calc(var(--space-7) * -1);
+  z-index: 2;
+  height: 30px;
+  padding: 0 var(--space-4);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-separator);
+  background: var(--color-bg-content);
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.tracklist__head span:nth-child(3),
+.tracklist__head span:nth-child(4) {
+  text-align: right;
+}
+
+.track-row {
+  display: grid;
+  grid-template-columns: var(--track-grid);
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--row-height-track);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.track-row:hover {
+  background: var(--color-bg-hover);
+}
+
+.track-row.is-selected {
+  background: var(--color-bg-selected);
+}
+
+.track-row.is-unplayable .track-row__title,
+.track-row.is-unplayable .track-row__num {
+  color: var(--color-text-disabled);
+}
+
+/* index → play glyph on hover → equalizer while playing */
+.track-row__num {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 100%;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.track-row__index,
+.track-row__play {
+  grid-area: 1 / 1;
+}
+
+.track-row__play {
+  display: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-primary);
+}
+
+.track-row__play svg {
+  width: 14px;
+  height: 14px;
+}
+
+.track-row:hover .track-row__index,
+.track-row:focus-visible .track-row__index {
+  visibility: hidden;
+}
+
+.track-row:hover .track-row__play,
+.track-row:focus-visible .track-row__play {
+  display: flex;
+}
+
+.track-row.is-playing .track-row__index,
+.track-row.is-playing .track-row__play {
+  display: none;
+  visibility: hidden;
+}
+
+.track-row.is-playing .eq {
+  display: flex;
+}
+
+.track-row.is-playing .track-row__title {
+  color: var(--color-track-playing-text);
+  font-weight: var(--weight-medium);
+}
+
+/* equalizer */
+.eq {
+  grid-area: 1 / 1;
+  display: none;
+  align-items: flex-end;
+  gap: 2px;
+  height: 13px;
+}
+
+.eq span {
+  width: 2px;
+  border-radius: 1px;
+  background: var(--color-track-playing-text);
+  animation: eq-bounce 900ms var(--ease-standard) infinite alternate;
+}
+
+.eq span:nth-child(1) { height: 40%; animation-delay: 0ms; }
+.eq span:nth-child(2) { height: 100%; animation-delay: 180ms; }
+.eq span:nth-child(3) { height: 65%; animation-delay: 360ms; }
+
+@keyframes eq-bounce {
+  from { transform: scaleY(0.35); }
+  to   { transform: scaleY(1); }
+}
+
+.track-row.is-paused .eq span {
+  animation-play-state: paused;
+}
+
+.track-row__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  font-size: var(--font-size-md);
+  color: var(--color-text-primary);
+}
+
+.track-row__len,
+.track-row__dl {
+  text-align: right;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.track-row__dl {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+.track-row__dl .meter {
+  width: 44px;
+  height: 3px;
+  flex: 0 0 auto;
+}
+
+.track-row__state {
+  display: grid;
+  place-items: center;
+  color: var(--color-success);
+}
+
+.track-row__state svg {
+  width: 15px;
+  height: 15px;
+}

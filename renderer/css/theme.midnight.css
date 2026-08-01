@@ -1,0 +1,74 @@
+/* ============================================================================
+   THEME: Midnight (default, dark)
+
+   THEME CONTRACT — a theme file may redefine only the semantic --color-* and
+   --glass-* tokens below, plus optionally --font-sans, --radius-*, --duration-*.
+   It may define its own private primitives. Component CSS that references a raw
+   hex value or an --mp-* primitive is a bug: it will not follow the theme.
+   ========================================================================= */
+
+:root,
+[data-theme='midnight'] {
+  color-scheme: dark;
+
+  /* surfaces */
+  --color-bg-app: var(--mp-gray-950);
+  --color-bg-sidebar: var(--mp-gray-900);
+  --color-bg-content: var(--mp-gray-950);
+  --color-bg-surface: var(--mp-gray-850);
+  --color-bg-surface-raised: var(--mp-gray-800);
+  --color-bg-hover: rgba(255, 255, 255, 0.045);
+  --color-bg-active: rgba(255, 255, 255, 0.075);
+  --color-bg-selected: var(--mp-gray-750);
+  --color-bg-input: var(--mp-gray-850);
+  --color-bg-scrim: rgba(0, 0, 0, 0.55);
+  --color-bg-skeleton: rgba(255, 255, 255, 0.05);
+  --color-bg-skeleton-sheen: rgba(255, 255, 255, 0.09);
+
+  /* text — ratios against --color-bg-app */
+  --color-text-primary: var(--mp-gray-100);     /* 15.4:1 */
+  --color-text-secondary: var(--mp-gray-300);   /*  7.5:1 */
+  --color-text-tertiary: var(--mp-gray-400);    /*  4.95:1 — 15px and up only */
+  --color-text-disabled: var(--mp-gray-500);
+  --color-text-on-accent: var(--mp-white);
+  --color-text-link: var(--mp-accent-400);      /*  7.4:1 */
+
+  /* lines */
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-border-strong: var(--mp-gray-600);
+  --color-separator: rgba(255, 255, 255, 0.055);
+
+  /* accent + state */
+  --color-accent: var(--mp-accent-500);         /*  5.25:1 — AA text, 3:1 UI */
+  --color-accent-hover: var(--mp-accent-400);
+  --color-accent-active: var(--mp-accent-600);
+  --color-accent-subtle: rgba(91, 135, 201, 0.14);
+  --color-focus: var(--mp-accent-400);
+  --color-success: var(--mp-green-500);
+  --color-warning: var(--mp-amber-500);
+  --color-danger: var(--mp-red-500);            /*  5.2:1 */
+  --color-danger-hover: var(--mp-red-400);
+  --color-danger-subtle: rgba(217, 97, 92, 0.14);
+
+  /* media-specific */
+  --color-track-playing-text: var(--mp-accent-400);
+  --color-scrubber-track: rgba(255, 255, 255, 0.1);
+  --color-scrubber-buffered: rgba(255, 255, 255, 0.22);
+  --color-scrubber-fill: var(--color-text-primary);
+  --color-scrubber-thumb: var(--mp-white);
+  --color-meter-track: rgba(255, 255, 255, 0.09);
+  --color-meter-fill: var(--color-accent);
+  --color-artwork-sat: 30%;
+  --color-artwork-light: 22%;
+
+  /* glass — consumed ONLY by transport.css */
+  --glass-bg: rgba(22, 22, 26, 0.72);
+  --glass-blur: 20px;
+  --glass-saturate: 180%;
+  --glass-border: rgba(255, 255, 255, 0.08);
+
+  /* composites */
+  --shadow-transport: 0 -1px 0 var(--glass-border), 0 -12px 32px rgba(0, 0, 0, 0.45);
+  --focus-ring: 0 0 0 2px var(--color-bg-app), 0 0 0 4px var(--color-focus);
+}

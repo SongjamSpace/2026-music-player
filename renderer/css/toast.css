@@ -1,0 +1,93 @@
+/* ============================================================================
+   TOASTS — bottom-right, stacked above the transport.
+   ========================================================================= */
+
+.toasts {
+  position: fixed;
+  right: var(--space-6);
+  bottom: calc(var(--transport-height) + var(--space-5));
+  z-index: 100;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--space-3);
+  width: min(360px, calc(100vw - var(--space-10)));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-4) var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface-raised);
+  box-shadow: var(--shadow-md), inset 0 0 0 1px var(--color-border);
+  font-size: var(--font-size-sm);
+  pointer-events: auto;
+  animation: toast-in var(--duration-base) var(--ease-spring);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.toast.is-leaving {
+  animation: toast-out var(--duration-fast) var(--ease-exit) forwards;
+}
+
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+.toast__body {
+  flex: 1;
+  min-width: 0;
+  line-height: var(--line-snug);
+  color: var(--color-text-primary);
+}
+
+.toast--error {
+  box-shadow: var(--shadow-md), inset 0 0 0 1px var(--color-danger-subtle);
+}
+
+.toast--error .toast__body {
+  color: var(--color-danger);
+}
+
+.toast__action {
+  flex: 0 0 auto;
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-accent-hover);
+  padding: 0 var(--space-2);
+}
+
+.toast__action:hover {
+  text-decoration: underline;
+}
+
+.toast__close {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-xs);
+  color: var(--color-text-tertiary);
+  display: grid;
+  place-items: center;
+}
+
+.toast__close:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.toast__close svg {
+  width: 13px;
+  height: 13px;
+}

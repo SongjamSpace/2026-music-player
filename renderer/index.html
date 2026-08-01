@@ -1,65 +1,307 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="midnight">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src http://127.0.0.1:* blob:;">
+  <!-- img-src and media-src both need the loopback wildcard: cover art and audio
+       are served by the same per-torrent HTTP server, each on a random port. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:*; media-src http://127.0.0.1:* blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none';">
   <title>2026 Music Player</title>
-  <link rel="stylesheet" href="styles.css">
+
+  <link rel="stylesheet" href="css/tokens.primitives.css">
+  <link rel="stylesheet" href="css/theme.midnight.css">
+  <link rel="stylesheet" href="css/theme.daylight.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/sidebar.css">
+  <link rel="stylesheet" href="css/tracklist.css">
+  <link rel="stylesheet" href="css/transport.css">
+  <link rel="stylesheet" href="css/states.css">
+  <link rel="stylesheet" href="css/dialogs.css">
+  <link rel="stylesheet" href="css/toast.css">
+
+  <!-- Render-blocking on purpose: sets data-theme before first paint. -->
+  <script src="js/namespace.js"></script>
+  <script src="js/theme.js"></script>
 </head>
 <body>
-  <div id="fatal-error" class="fatal-error" style="display:none;"></div>
-  <div class="app">
-    <header class="header">
-      <div class="header-top">
-        <h1 class="app-title">2026 Music Player</h1>
-        <div class="header-actions">
-          <button type="button" id="open-download-folder-btn" class="btn-secondary" title="Open download folder">Open download folder</button>
-        </div>
+  <div id="fatal-error" class="fatal-error" role="alert" hidden></div>
+
+  <div class="shell">
+    <!-- ── sidebar ──────────────────────────────────────────────────── -->
+    <nav class="sidebar" aria-label="Library">
+      <div class="sidebar__head">
+        <span class="sidebar__brand">2026 Music Player</span>
+        <button type="button" id="btn-add-magnet" class="btn btn--primary btn--block no-drag">
+          Add Magnet
+        </button>
       </div>
-      <div class="magnet-input">
-        <textarea id="magnet-input" placeholder="Paste magnet link (magnet:?xt=urn:btih:...)" rows="1"></textarea>
-        <button id="add-torrent-btn" type="button" class="btn-primary">Add torrent</button>
+
+      <div class="sidebar__section-label">
+        <span class="eyebrow">Library</span>
+        <span class="eyebrow tnum" id="torrent-count">0</span>
       </div>
-      <div id="add-status" class="add-status" aria-live="polite"></div>
+
+      <ul class="sidebar__list" id="torrent-list" role="listbox" aria-label="Torrents"></ul>
+
+      <div class="sidebar__foot">
+        <button type="button" id="btn-downloads" class="btn btn--ghost no-drag">
+          Reveal Downloads
+        </button>
+        <button type="button" id="btn-settings" class="btn btn--ghost no-drag">
+          Settings
+        </button>
+      </div>
+    </nav>
+
+    <!-- ── titlebar ─────────────────────────────────────────────────── -->
+    <header class="titlebar" role="banner">
+      <span class="titlebar__spacer"></span>
+      <label class="filter-field no-drag">
+        <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+          <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+                d="M9 15a6 6 0 1 0 0-12 6 6 0 0 0 0 12ZM13.5 13.5 17 17"/>
+        </svg>
+        <input type="text" id="filter-input" placeholder="Filter tracks" aria-label="Filter tracks">
+      </label>
     </header>
 
-    <main class="main">
-      <section class="torrents-section">
-        <h2 class="section-title">Torrents</h2>
-        <ul id="torrent-list" class="torrent-list"></ul>
-      </section>
-
-      <section class="files-section">
-        <h2 class="section-title">Tracks</h2>
-        <div class="files-section-header">
-          <p id="files-hint" class="hint">Select a torrent to see its files.</p>
-          <button type="button" id="open-torrent-folder-btn" class="btn-secondary btn-open-folder" title="Open folder for selected torrent" style="display: none;">Open folder</button>
+    <!-- ── content ──────────────────────────────────────────────────── -->
+    <main class="content" id="content">
+      <div class="content__inner">
+        <div class="video-stage" id="video-stage">
+          <video id="video-player" playsinline preload="metadata"></video>
         </div>
-        <ul id="file-list" class="file-list"></ul>
-      </section>
+
+        <div class="banner" id="torrent-banner" hidden>
+          <span class="banner__text"></span>
+          <button type="button" class="btn btn--ghost banner__dismiss">Dismiss</button>
+        </div>
+
+        <section class="torrent-header" id="torrent-header" hidden>
+          <div class="artwork" aria-hidden="true"></div>
+          <div class="torrent-header__body">
+            <h1 class="torrent-header__title"></h1>
+            <p class="torrent-header__meta tnum"></p>
+            <div class="torrent-header__actions">
+              <button type="button" id="btn-play-all" class="btn btn--primary">Play All</button>
+              <button type="button" id="btn-shuffle-all" class="btn btn--secondary">Shuffle</button>
+              <button type="button" id="btn-open-torrent-folder" class="btn btn--ghost">Reveal in Finder</button>
+              <button type="button" id="btn-remove-torrent" class="btn btn--ghost">Remove</button>
+            </div>
+          </div>
+          <div class="meter torrent-header__meter"><span class="meter__fill"></span></div>
+        </section>
+
+        <section class="tracklist" aria-label="Tracks">
+          <div class="tracklist__head" id="tracklist-head" hidden>
+            <span>#</span>
+            <span>Title</span>
+            <span>Length</span>
+            <span>Downloaded</span>
+            <span></span>
+          </div>
+          <ul id="track-list" role="listbox" aria-label="Tracks" tabindex="0"></ul>
+        </section>
+      </div>
     </main>
-
-    <footer class="now-playing-bar">
-      <div class="now-playing-info">
-        <div class="now-playing-cover"></div>
-        <div class="now-playing-meta">
-          <div id="now-playing" class="now-playing-title"></div>
-          <span id="track-position" class="track-position"></span>
-        </div>
-      </div>
-      <div class="now-playing-controls">
-        <div class="playback-buttons">
-          <button type="button" id="btn-prev" class="btn-icon" title="Previous track">Prev</button>
-          <button type="button" id="btn-next" class="btn-icon" title="Next track">Next</button>
-        </div>
-        <div class="media-container">
-          <audio id="audio-player" controls crossorigin="anonymous"></audio>
-          <video id="video-player" controls crossorigin="anonymous" style="display: none;"></video>
-        </div>
-      </div>
-    </footer>
   </div>
-  <script src="app.js"></script>
+
+  <!-- ── transport ──────────────────────────────────────────────────── -->
+  <footer class="transport is-idle" id="transport" role="region" aria-label="Playback controls">
+    <div class="np">
+      <div class="artwork" aria-hidden="true"></div>
+      <div class="np__meta">
+        <span class="np__title truncate" id="np-title">Nothing playing</span>
+        <span class="np__sub truncate" id="np-sub"></span>
+        <span class="np__pos" id="np-pos"></span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="controls__buttons">
+        <button type="button" id="btn-shuffle" class="icon-btn" aria-pressed="false" aria-label="Shuffle"></button>
+        <button type="button" id="btn-prev" class="icon-btn" aria-label="Previous track"></button>
+        <button type="button" id="btn-play" class="btn-play" aria-label="Play"></button>
+        <button type="button" id="btn-next" class="icon-btn" aria-label="Next track"></button>
+        <button type="button" id="btn-repeat" class="icon-btn" aria-pressed="false" aria-label="Repeat: off"></button>
+      </div>
+      <div class="controls__seek">
+        <span class="time time--start" id="time-start">0:00</span>
+        <div class="scrubber" id="scrubber">
+          <div class="scrubber__track"></div>
+          <div class="scrubber__buffered"></div>
+          <div class="scrubber__played"></div>
+          <input type="range" min="0" max="1000" step="1" value="0" aria-label="Seek" disabled>
+        </div>
+        <span class="time" id="time-end">—:—</span>
+      </div>
+    </div>
+
+    <div class="transport__right">
+      <span class="status-chip" id="status-chip" aria-live="polite"></span>
+      <button type="button" id="btn-fullscreen" class="icon-btn" aria-label="Fullscreen video" hidden></button>
+      <div class="volume">
+        <button type="button" id="btn-mute" class="icon-btn" aria-pressed="false" aria-label="Mute"></button>
+        <input type="range" id="volume" min="0" max="100" step="1" value="80" aria-label="Volume">
+      </div>
+    </div>
+  </footer>
+
+  <audio id="audio-player" preload="metadata"></audio>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="menu" id="context-menu" role="menu" hidden></div>
+
+  <!-- ── dialogs ────────────────────────────────────────────────────── -->
+  <dialog id="add-dialog" aria-labelledby="add-dialog-title">
+    <form id="add-form" method="dialog">
+      <div class="dialog__head">
+        <h2 class="dialog__title" id="add-dialog-title">Add Magnet</h2>
+      </div>
+      <div class="dialog__body">
+        <div class="field">
+          <label class="field__label" for="magnet-input">Magnet link</label>
+          <textarea id="magnet-input" rows="4" placeholder="magnet:?xt=urn:btih:…" spellcheck="false"></textarea>
+          <p class="dialog__hint" id="add-hint"></p>
+        </div>
+      </div>
+      <div class="dialog__foot">
+        <button type="button" class="btn btn--ghost" data-dismiss>Cancel</button>
+        <button type="submit" class="btn btn--primary" id="add-submit">Add Torrent</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-dialog-title">
+    <div class="dialog__head">
+      <h2 class="dialog__title" id="confirm-dialog-title"></h2>
+    </div>
+    <div class="dialog__body"></div>
+    <div class="dialog__foot">
+      <button type="button" class="btn btn--ghost" data-dismiss>Cancel</button>
+      <button type="button" class="btn btn--primary js-confirm">Confirm</button>
+    </div>
+  </dialog>
+
+  <dialog id="settings-dialog" aria-labelledby="settings-dialog-title">
+    <div class="dialog__head">
+      <h2 class="dialog__title" id="settings-dialog-title">Settings</h2>
+    </div>
+    <div class="dialog__body">
+      <div class="settings-group">
+        <span class="settings-group__label">Appearance</span>
+        <div class="theme-picker" id="theme-picker" role="radiogroup" aria-label="Theme"></div>
+      </div>
+
+      <div class="settings-group">
+        <span class="settings-group__label">Downloads</span>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Download folder</div>
+            <div class="setting-row__value" id="settings-path">—</div>
+            <div class="setting-row__desc">Applies to new torrents. Existing ones keep their current location.</div>
+          </div>
+        </div>
+        <div class="setting-row">
+          <button type="button" class="btn btn--secondary" id="btn-change-path">Change…</button>
+          <button type="button" class="btn btn--ghost" id="btn-reveal-path">Reveal in Finder</button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <span class="settings-group__label">Playback</span>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Read track durations</div>
+            <div class="setting-row__desc">
+              Reads length from files that have finished downloading. Uses bandwidth and can
+              slow the track you're listening to, so it's off by default. Durations are always
+              learned for free from tracks you play.
+            </div>
+          </div>
+          <button type="button" class="switch" id="switch-durations"></button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <span class="settings-group__label">About</span>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">2026 Music Player</div>
+            <div class="setting-row__desc" id="settings-version"></div>
+            <div class="setting-row__desc" id="settings-count"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="dialog__foot">
+      <button type="button" class="btn btn--primary" data-close data-dismiss>Done</button>
+    </div>
+  </dialog>
+
+  <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-dialog-title">
+    <div class="dialog__head">
+      <h2 class="dialog__title" id="shortcuts-dialog-title">Keyboard Shortcuts</h2>
+    </div>
+    <div class="dialog__body">
+      <div class="shortcuts"></div>
+    </div>
+    <div class="dialog__foot">
+      <button type="button" class="btn btn--primary" data-dismiss>Done</button>
+    </div>
+  </dialog>
+
+  <!-- ── row templates ──────────────────────────────────────────────────
+       fetch() doesn't work over file://, so partials can't be loaded. These
+       are cloned per row, which is what keeps innerHTML out of the hot path. -->
+  <template id="tpl-torrent-row">
+    <li class="torrent-row" role="option" aria-selected="false" tabindex="-1">
+      <span class="torrent-row__name truncate"></span>
+      <button type="button" class="icon-btn torrent-row__more"></button>
+      <span class="torrent-row__status truncate"></span>
+      <span class="meter torrent-row__meter"><span class="meter__fill"></span></span>
+    </li>
+  </template>
+
+  <template id="tpl-track-row">
+    <li class="track-row" role="option" aria-selected="false" tabindex="-1">
+      <span class="track-row__num">
+        <span class="track-row__index"></span>
+        <span class="track-row__play"></span>
+        <span class="eq" aria-hidden="true"><span></span><span></span><span></span></span>
+      </span>
+      <span class="track-row__title">
+        <span class="track-row__label truncate"></span>
+        <span class="track-row__chips"></span>
+      </span>
+      <span class="track-row__len"></span>
+      <span class="track-row__dl">
+        <span class="track-row__pct"></span>
+        <span class="meter"><span class="meter__fill"></span></span>
+      </span>
+      <span class="track-row__state"></span>
+    </li>
+  </template>
+
+  <!-- Ordered classic scripts sharing window.MP: ES modules don't load over
+       file://. main.js is last and is the only file that boots. -->
+  <script src="js/util.js"></script>
+  <script src="js/icons.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/artwork.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/actions.js"></script>
+  <script src="js/player.js"></script>
+  <script src="js/ui/toast.js"></script>
+  <script src="js/ui/menu.js"></script>
+  <script src="js/ui/empty.js"></script>
+  <script src="js/ui/dialogs.js"></script>
+  <script src="js/ui/sidebar.js"></script>
+  <script src="js/ui/torrent-header.js"></script>
+  <script src="js/ui/tracklist.js"></script>
+  <script src="js/ui/transport.js"></script>
+  <script src="js/ui/shortcuts.js"></script>
+  <script src="js/main.js"></script>
 </body>
 </html>
