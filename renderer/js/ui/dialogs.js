@@ -2,7 +2,7 @@
   'use strict';
 
   var addDlg, addForm, addField, addHint, addSubmit;
-  var settingsDlg, confirmDlg, shortcutsDlg;
+  var settingsDlg, confirmDlg, shortcutsDlg, promptDlg;
 
   // -- add magnet ----------------------------------------------------------
 
@@ -57,6 +57,35 @@
       confirmDlg.returnValue = '';
       confirmDlg.showModal();
       ok.focus();
+    });
+  }
+
+  // -- prompt ----------------------------------------------------------------
+
+  /** Resolves with the trimmed string, or null if cancelled. */
+  function prompt(opts) {
+    return new Promise(function (resolve) {
+      promptDlg.querySelector('.dialog__title').textContent = opts.title;
+      var label = promptDlg.querySelector('.field__label');
+      label.textContent = opts.label || '';
+      var input = promptDlg.querySelector('#prompt-input');
+      input.value = opts.value || '';
+      input.placeholder = opts.placeholder || '';
+      var ok = promptDlg.querySelector('.js-prompt-ok');
+      ok.textContent = opts.confirmLabel || 'Save';
+
+      var done = function (value) {
+        promptDlg.removeEventListener('close', onClose);
+        resolve(value);
+      };
+      var onClose = function () {
+        done(promptDlg.returnValue === 'ok' ? input.value.trim() || null : null);
+      };
+      promptDlg.addEventListener('close', onClose);
+      promptDlg.returnValue = '';
+      promptDlg.showModal();
+      input.focus();
+      input.select();
     });
   }
 
@@ -155,19 +184,40 @@
     ['Find in tracks', '⌘ F'],
     ['Reveal in Finder', '⌘ ⇧ R'],
     ['Fullscreen video', 'F'],
+    ['Audio effects', 'E'],
     ['Cycle theme', '⌘ ⌥ T'],
     ['Shortcuts', '?'],
+  ];
+
+  /** Shown inside the effects panel section of the sheet. */
+  var EQ_SHORTCUTS = [
+    ['Move band frequency', '← →'],
+    ['…by an octave', '⇧ ← →'],
+    ['Band gain', '↑ ↓'],
+    ['Band Q', '[ ]'],
+    ['Select previous / next band', 'PgUp PgDn'],
+    ['Filter type menu', '↵'],
+    ['Remove band', '⌫'],
+    ['Add band an octave up', '+'],
   ];
 
   function openShortcuts() {
     var body = shortcutsDlg.querySelector('.shortcuts');
     if (!body.childElementCount) {
-      SHORTCUTS.forEach(function (pair) {
-        var row = MP.util.el('div', 'shortcuts__row');
-        row.appendChild(MP.util.el('span', null, pair[0]));
-        row.appendChild(MP.util.el('kbd', null, pair[1]));
-        body.appendChild(row);
-      });
+      var addRows = function (list) {
+        list.forEach(function (pair) {
+          var row = MP.util.el('div', 'shortcuts__row');
+          row.appendChild(MP.util.el('span', null, pair[0]));
+          row.appendChild(MP.util.el('kbd', null, pair[1]));
+          body.appendChild(row);
+        });
+      };
+      addRows(SHORTCUTS);
+      var heading = MP.util.el('div', 'settings-group__label', 'Equaliser curve');
+      heading.style.gridColumn = '1 / -1';
+      heading.style.marginTop = 'var(--space-4)';
+      body.appendChild(heading);
+      addRows(EQ_SHORTCUTS);
     }
     shortcutsDlg.showModal();
   }
@@ -186,6 +236,7 @@
     addSubmit = document.getElementById('add-submit');
     confirmDlg = document.getElementById('confirm-dialog');
     shortcutsDlg = document.getElementById('shortcuts-dialog');
+    promptDlg = document.getElementById('prompt-dialog');
 
     addForm.addEventListener('submit', submitAdd);
     addField.addEventListener('keydown', function (e) {
@@ -210,6 +261,7 @@
     openSettings: openSettings,
     openShortcuts: openShortcuts,
     confirm: confirm,
+    prompt: prompt,
     anyOpen: anyOpen,
   };
 })();

@@ -51,11 +51,40 @@ MP_DEVTOOLS=1 npm start   # open DevTools detached
 4. Downloads go to `~/Music/2026-Music-Player` by default; change it in
    **Settings**. Added magnets are restored when you reopen the app.
 
+### Audio effects
+
+`E` (or the slider button beside the volume control) opens a parametric
+equaliser and effects rack that processes playback live.
+
+- **Parametric EQ** — up to 12 bands over a log-frequency curve with the live
+  spectrum drawn behind it. Drag a node for frequency and gain, scroll to change
+  Q, double-click empty space to add a band or a node to remove it, right-click
+  for the filter type (bell / shelf / cut / notch). Every band is also editable
+  as plain number fields in the list below, which is the keyboard-complete path.
+- **Preamp** with an **Auto** button that sets it to cancel the loudest boost.
+- **Dynamics** — compressor with a live gain-reduction meter, plus a brick-wall
+  limiter that is **on by default** so EQ boosts can't clip.
+- **Stereo width** — mid/side, mono through to 200%.
+- **Crossfeed** — Bauer-style bleed between channels; eases hard-panned stereo
+  on headphones. Leave it off on speakers.
+- **Reverb** — convolution with an impulse response generated at runtime, so no
+  audio assets ship with the app.
+- Presets (Flat, Bass Boost, Vocal, Acoustic, Electronic, Loudness, Night, plus
+  your own), A/B snapshots, and a global bypass that crossfades rather than
+  cutting.
+
+Everything except the limiter is off by default: the app sounds exactly as it
+did before you touch a control.
+
 ### Keyboard
 
 `Space` play/pause · `←`/`→` seek ±10s (`⇧` for ±30s) · `⌘←`/`⌘→` prev/next ·
 `⌘↑`/`⌘↓` volume · `M` mute · `S` shuffle · `R` repeat · `⌘F` filter tracks ·
-`⌘,` settings · `F` fullscreen video · `⌘⌥T` cycle theme · `?` full list.
+`⌘,` settings · `F` fullscreen video · `E` audio effects · `⌘⌥T` cycle theme ·
+`?` full list.
+
+With the EQ curve focused: `←`/`→` frequency, `↑`/`↓` gain, `[`/`]` Q,
+`PgUp`/`PgDn` select band, `↵` type menu, `⌫` remove, `+` add.
 
 Media keys and the macOS Now Playing widget work via `navigator.mediaSession`.
 
@@ -104,12 +133,17 @@ renderer/
     base.css layout.css sidebar.css tracklist.css transport.css
     states.css dialogs.css toast.css
   js/
-    namespace.js util.js icons.js theme.js
+    namespace.js util.js icons.js theme.js artwork.js
     store.js              topic-scoped state
     api.js                the ONLY caller of playerAPI.on*
     actions.js player.js main.js
+    audio/ dsp-defaults.js  pure data + normalise(); no DOM, no AudioContext
+           ir.js            algorithmic reverb impulse response
+           graph.js         owns the AudioContext and every node
+           dsp.js           façade: prefs, CORS probe, presets, lifecycle
     ui/  sidebar.js torrent-header.js tracklist.js transport.js
          dialogs.js toast.js menu.js empty.js shortcuts.js
+         eq-canvas.js dsp-panel.js
 ```
 
 Three rules hold the thing together:
@@ -126,6 +160,19 @@ update in place; reordering uses `appendChild`, which moves an attached node.
 The 500 ms progress tick emits only `torrent:progress:<id>`, each row early-outs
 on unchanged rounded values, and meters animate `transform: scaleX()` rather
 than `width`, so a steady-state tick does no layout at all.
+
+**Web Audio.** A `MediaElementAudioSourceNode` on CORS-tainted media outputs
+silence, and adopting an element is irreversible — a second call throws, and
+closing the context doesn't release it. So the media elements load with
+`crossorigin="anonymous"` (set from JS, never in the HTML, so it stays
+revocable), the main process forces `Access-Control-Allow-Origin: *` on the
+loopback stream servers, and before the real elements are ever touched a
+throwaway element is probed for signal. If any of that fails, `crossOrigin` is
+dropped, the result is remembered, and playback continues without effects.
+Modules are disabled by setting neutral parameters rather than rewiring: a
+peaking biquad at 0 dB is exactly unity, so "off" is genuinely transparent.
+Reverb is the one exception — a convolver runs regardless of its output gain, so
+its input is disconnected.
 
 **IPC.** `js/api.js` subscribes to each channel exactly once and fans out with
 real unsubscribe functions. Nothing else may call `playerAPI.on*`: there's no

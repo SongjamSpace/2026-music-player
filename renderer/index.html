@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="css/sidebar.css">
   <link rel="stylesheet" href="css/tracklist.css">
   <link rel="stylesheet" href="css/transport.css">
+  <link rel="stylesheet" href="css/dsp.css">
   <link rel="stylesheet" href="css/states.css">
   <link rel="stylesheet" href="css/dialogs.css">
   <link rel="stylesheet" href="css/toast.css">
@@ -141,6 +142,10 @@
     <div class="transport__right">
       <span class="status-chip" id="status-chip" aria-live="polite"></span>
       <button type="button" id="btn-fullscreen" class="icon-btn" aria-label="Fullscreen video" hidden></button>
+      <!-- Before .volume so the narrow-window rule that hides the volume slider
+           can't take the effects button with it. -->
+      <button type="button" id="btn-dsp" class="icon-btn" aria-label="Audio effects"
+              aria-expanded="false" aria-haspopup="dialog" aria-controls="dsp-panel"></button>
       <div class="volume">
         <button type="button" id="btn-mute" class="icon-btn" aria-pressed="false" aria-label="Mute"></button>
         <input type="range" id="volume" min="0" max="100" step="1" value="80" aria-label="Volume">
@@ -152,6 +157,10 @@
 
   <div class="toasts" id="toasts"></div>
   <div class="menu" id="context-menu" role="menu" hidden></div>
+
+  <!-- Body-level on purpose: .transport has backdrop-filter, which would make it
+       a containing block for this fixed element and clip it to the bar height. -->
+  <div class="dsp" id="dsp-panel" role="dialog" aria-modal="false" aria-label="Audio effects" hidden></div>
 
   <!-- ── dialogs ────────────────────────────────────────────────────── -->
   <dialog id="add-dialog" aria-labelledby="add-dialog-title">
@@ -240,6 +249,24 @@
     </div>
   </dialog>
 
+  <dialog id="prompt-dialog" aria-labelledby="prompt-dialog-title">
+    <form method="dialog">
+      <div class="dialog__head">
+        <h2 class="dialog__title" id="prompt-dialog-title"></h2>
+      </div>
+      <div class="dialog__body">
+        <div class="field">
+          <label class="field__label" for="prompt-input"></label>
+          <input type="text" id="prompt-input" spellcheck="false">
+        </div>
+      </div>
+      <div class="dialog__foot">
+        <button type="button" class="btn btn--ghost" data-dismiss>Cancel</button>
+        <button type="submit" class="btn btn--primary js-prompt-ok" value="ok">Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="shortcuts-dialog" aria-labelledby="shortcuts-dialog-title">
     <div class="dialog__head">
       <h2 class="dialog__title" id="shortcuts-dialog-title">Keyboard Shortcuts</h2>
@@ -292,6 +319,10 @@
   <script src="js/artwork.js"></script>
   <script src="js/api.js"></script>
   <script src="js/actions.js"></script>
+  <script src="js/audio/dsp-defaults.js"></script>
+  <script src="js/audio/ir.js"></script>
+  <script src="js/audio/graph.js"></script>
+  <script src="js/audio/dsp.js"></script>
   <script src="js/player.js"></script>
   <script src="js/ui/toast.js"></script>
   <script src="js/ui/menu.js"></script>
@@ -301,6 +332,9 @@
   <script src="js/ui/torrent-header.js"></script>
   <script src="js/ui/tracklist.js"></script>
   <script src="js/ui/transport.js"></script>
+  <!-- before shortcuts.js so the panel's Escape handler registers first -->
+  <script src="js/ui/eq-canvas.js"></script>
+  <script src="js/ui/dsp-panel.js"></script>
   <script src="js/ui/shortcuts.js"></script>
   <script src="js/main.js"></script>
 </body>

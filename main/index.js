@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const Store = require('electron-store');
@@ -23,12 +23,43 @@ const DEFAULT_PREFS = {
   prefetch: true,
   readDurations: false,
   durations: {},
+  dsp: {},
 };
 
 let mainWindow = null;
 
 function getPrefs() {
   return Object.assign({}, DEFAULT_PREFS, store.get('prefs', {}));
+}
+
+/**
+ * Force permissive CORS on the per-torrent stream servers.
+ *
+ * Web Audio silently outputs nothing for a CORS-tainted media element, so the
+ * equaliser needs the elements loaded with `crossorigin="anonymous"`. WebTorrent's
+ * server does send an ACAO header, but only echoes the request's own origin — and
+ * this renderer is a file:// page, so that origin is the string "null". Rather than
+ * depend on Chromium accepting a literal `null` match, pin it to `*`, which is
+ * always valid for an uncredentialed request.
+ *
+ * Filtering happens in JS rather than via a urls match pattern because Chrome
+ * patterns can't express "any port", and every torrent server gets a random one.
+ */
+function installStreamCorsHeaders() {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    if (details.url.indexOf('http://127.0.0.1:') !== 0) return callback({});
+
+    const headers = Object.assign({}, details.responseHeaders);
+    // Strip any existing variant first: two conflicting ACAO headers fail outright.
+    Object.keys(headers).forEach((key) => {
+      if (/^access-control-allow-(origin|methods|headers)$/i.test(key)) delete headers[key];
+    });
+    headers['Access-Control-Allow-Origin'] = ['*'];
+    headers['Access-Control-Allow-Methods'] = ['GET, HEAD, OPTIONS'];
+    headers['Access-Control-Allow-Headers'] = ['Range'];
+    headers['Access-Control-Expose-Headers'] = ['Content-Length, Content-Range, Accept-Ranges'];
+    callback({ responseHeaders: headers });
+  });
 }
 
 function send(channel, payload) {
@@ -116,6 +147,8 @@ function buildMenu() {
         { label: 'Next Track', click: cmd('next') },
         { label: 'Previous Track', click: cmd('prev') },
         { type: 'separator' },
+        { label: 'Audio Effects…', accelerator: 'CmdOrCtrl+E', click: cmd('dsp') },
+        { type: 'separator' },
         { label: 'Mute', accelerator: 'CmdOrCtrl+Shift+M', click: cmd('mute') },
         { label: 'Shuffle', accelerator: 'CmdOrCtrl+Shift+S', click: cmd('shuffle') },
         { label: 'Cycle Repeat', accelerator: 'CmdOrCtrl+Shift+E', click: cmd('repeat') },
@@ -145,6 +178,7 @@ function buildMenu() {
 }
 
 app.whenReady().then(async () => {
+  installStreamCorsHeaders();
   torrentService.setCacheDir(path.join(app.getPath('userData'), 'torrents'));
   await torrentService.start();
 

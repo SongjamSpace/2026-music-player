@@ -10,6 +10,7 @@
   var queuePos = -1;
   var watchdog = null;
   var lastTimeAt = 0;
+  var corsRetried = {}; // src → already retried without CORS, so we don't loop
 
   var WATCHDOG_MS = 12000;
   var PREV_RESTART_THRESHOLD = 3; // seconds
@@ -129,7 +130,16 @@
       'playback:track'
     );
 
+    // Must be set BEFORE .src or it has no effect on the request. Web Audio
+    // outputs silence for a CORS-tainted element, so the effects chain depends
+    // on this — but it stays revocable at runtime (see the error handler).
+    if (MP.dsp.wantCrossOrigin()) active.crossOrigin = 'anonymous';
+    else active.removeAttribute('crossorigin');
+
     active.src = file.streamURL;
+    // Always reached from a user gesture, which is the only place an
+    // AudioContext can be created in a running state.
+    MP.dsp.onPlay(file.streamURL);
     applyVolume();
     active.play().catch(function (err) {
       // Autoplay rejection is benign here (user-gesture initiated), but a
@@ -203,6 +213,7 @@
       if (id) playAll(id, pb().shuffle);
       return;
     }
+    MP.dsp.onPlay(active.currentSrc);
     if (active.paused) active.play().catch(function () {});
     else active.pause();
   }
@@ -226,10 +237,20 @@
     var p = pb();
     // Quadratic taper: a linear slider feels wrong across the bottom third.
     var gain = Math.pow(MP.util.clamp(p.volume, 0, 1), 2);
-    audio.volume = gain;
-    video.volume = gain;
-    audio.muted = p.muted;
-    video.muted = p.muted;
+
+    if (MP.dsp.isAvailable()) {
+      // Level lives in the graph's masterGain once the chain is live. This
+      // avoids depending on whether Chromium applies element.volume before or
+      // after the source node, and turns mute into a 20ms fade, not a hard cut.
+      audio.volume = video.volume = 1;
+      audio.muted = video.muted = false;
+      MP.dspGraph.setOutputGain(p.muted ? 0 : gain);
+    } else {
+      audio.volume = gain;
+      video.volume = gain;
+      audio.muted = p.muted;
+      video.muted = p.muted;
+    }
   }
 
   var persistVolume = null;
@@ -440,6 +461,22 @@
       if (media !== active) return;
       clearWatchdog();
       var code = media.error ? media.error.code : 0;
+
+      // Parachute: if the failure could be the CORS request we added for the
+      // effects chain, drop it and retry once. Losing the equaliser is a far
+      // better outcome than losing playback, and this is the only place we'd
+      // find out that the ACAO header didn't land.
+      if (media.crossOrigin && !corsRetried[media.currentSrc]) {
+        corsRetried[media.currentSrc] = true;
+        MP.dsp.disableCrossOrigin('media error code ' + code);
+        var resumeAt = media.currentTime;
+        media.removeAttribute('crossorigin');
+        media.load();
+        if (resumeAt > 0) media.currentTime = resumeAt;
+        media.play().catch(function () {});
+        return;
+      }
+
       var message = ERROR_MESSAGES[code] || 'Playback failed.';
       MP.store.setPlayback({ isPlaying: false, isBuffering: false, error: message }, 'playback:state');
       var torrentId = pb().torrentId;
@@ -462,6 +499,8 @@
     attach(audio);
     attach(video);
     installMediaSession();
+    // The graph adopts these only after the CORS probe passes.
+    MP.dsp.setElements(audio, video);
 
     persistVolume = MP.util.debounce(function () {
       window.playerAPI.setPref('volume', pb().volume);
@@ -492,6 +531,9 @@
     seekBy: seekBy,
     seekTo: seekTo,
     setVolume: setVolume,
+    // Re-applies level after the DSP graph goes live, so control moves from the
+    // element to masterGain without the user hearing a step.
+    refreshVolume: applyVolume,
     toggleMute: toggleMute,
     setShuffle: setShuffle,
     cycleRepeat: cycleRepeat,

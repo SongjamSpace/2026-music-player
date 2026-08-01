@@ -110,6 +110,8 @@
     window.playerAPI
       .getPrefs()
       .then(function (prefs) {
+        // Before player.init: play() consults MP.dsp for the crossOrigin decision.
+        MP.dsp.init(prefs);
         MP.player.init(prefs);
         return seedSettings(prefs);
       })
@@ -118,6 +120,7 @@
         MP.torrentHeader.init();
         MP.tracklist.init();
         MP.transport.init();
+        MP.dspPanel.init();
         MP.shortcuts.init();
         wireChrome();
         return window.playerAPI.getTorrents();

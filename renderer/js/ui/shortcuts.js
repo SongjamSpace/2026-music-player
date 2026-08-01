@@ -38,6 +38,7 @@
       if (id) MP.actions.openTorrentFolder(id);
     },
     fullscreen: function () { MP.player.toggleFullscreen(); },
+    dsp: function () { MP.dspPanel.toggle(); },
   };
 
   function run(command) {
@@ -51,6 +52,11 @@
       if (e.key === '?' && !isTextTarget(e.target)) return;
       return;
     }
+
+    // The effects panel is non-modal, so global shortcuts still work while it's
+    // open — but not while focus is inside it, or the EQ's arrow keys would also
+    // seek the track.
+    if (MP.dspPanel.ownsKey()) return;
 
     var typing = isTextTarget(e.target);
     var mod = e.metaKey || e.ctrlKey;
@@ -95,6 +101,7 @@
       case 's': case 'S': run('shuffle'); break;
       case 'r': case 'R': run('repeat'); break;
       case 'f': case 'F': run('fullscreen'); break;
+      case 'e': case 'E': run('dsp'); break;
       case '?': run('shortcuts'); break;
     }
   }

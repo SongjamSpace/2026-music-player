@@ -1,0 +1,494 @@
+/* ============================================================================
+   DSP PANEL — parametric EQ + effects popover.
+
+   Namespaced `.dsp*` throughout: `.eq` already belongs to the now-playing
+   animated bars in tracklist.css.
+
+   The panel is a direct child of <body>, never of .transport — backdrop-filter
+   there makes it a containing block for position:fixed descendants, which would
+   clip this to the height of the transport bar.
+   ========================================================================= */
+
+.dsp {
+  position: fixed;
+  z-index: 130; /* above .menu (120) and .transport (50) */
+  display: flex;
+  flex-direction: column;
+  width: 560px;
+  max-width: calc(100vw - var(--space-7));
+  max-height: calc(100vh - var(--transport-height) - var(--space-7));
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-surface-raised);
+  box-shadow: var(--shadow-lg), inset 0 0 0 1px var(--color-border);
+  overflow: hidden;
+  animation: dsp-in var(--duration-base) var(--ease-emphasized);
+}
+
+@keyframes dsp-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+}
+
+/* ---- header ------------------------------------------------------------- */
+
+.dsp__head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--color-separator);
+}
+
+.dsp__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  margin-right: var(--space-2);
+}
+
+.dsp__spacer {
+  flex: 1;
+}
+
+.dsp__select {
+  height: 28px;
+  max-width: 150px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-input);
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  font-size: var(--font-size-xs);
+}
+
+.dsp__select:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--color-focus);
+}
+
+/* segmented A/B control */
+.dsp__seg {
+  display: flex;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+
+.dsp__seg button {
+  height: 28px;
+  min-width: 30px;
+  padding: 0 var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.dsp__seg button:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.dsp__seg button[aria-pressed='true'] {
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+}
+
+/* bypass: pressed means effects are ON */
+#dsp-bypass[aria-pressed='true'] {
+  color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+
+/* ---- body --------------------------------------------------------------- */
+
+.dsp__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* Flex children shrink by default, so without this the sections compress into
+   each other instead of overflowing into the scroll container. */
+.dsp__body > * {
+  flex: 0 0 auto;
+}
+
+.dsp__banner {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-normal);
+}
+
+.dsp__banner[hidden] {
+  display: none;
+}
+
+/* ---- canvas block (phase 3) --------------------------------------------- */
+
+.dsp__display {
+  position: sticky;
+  top: calc(var(--space-5) * -1);
+  z-index: 1;
+  margin: calc(var(--space-5) * -1) calc(var(--space-5) * -1) 0;
+  padding: var(--space-5) var(--space-5) var(--space-3);
+  background: var(--color-bg-surface-raised);
+  border-bottom: 1px solid var(--color-separator);
+}
+
+.dsp__canvas-wrap {
+  position: relative;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-app);
+  box-shadow: inset 0 0 0 1px var(--color-border-subtle);
+  overflow: hidden;
+}
+
+#dsp-eq-canvas {
+  display: block;
+  width: 100%;
+  height: 210px;
+  touch-action: none; /* pointer capture drags must not scroll the panel */
+  cursor: crosshair;
+}
+
+#dsp-eq-canvas:focus-visible {
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-md);
+}
+
+.dsp__readout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+  min-height: 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.dsp__readout-hint {
+  color: var(--color-text-tertiary);
+}
+
+.dsp__clip {
+  color: var(--color-danger);
+  font-weight: var(--weight-semibold);
+}
+
+.dsp__clip[hidden] {
+  display: none;
+}
+
+/* ---- generic parameter row ---------------------------------------------- */
+
+.dsp__param {
+  display: grid;
+  grid-template-columns: 108px 1fr 68px;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.dsp__param-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.dsp__param input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  margin: 0;
+  background: none;
+}
+
+.dsp__param input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-meter-track);
+}
+
+.dsp__param input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+  box-shadow: var(--shadow-xs);
+}
+
+.dsp__param input[type='range']:disabled::-webkit-slider-thumb {
+  background: var(--color-text-disabled);
+}
+
+.dsp__num {
+  width: 100%;
+  height: 26px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: var(--color-bg-input);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.dsp__num:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--color-focus);
+}
+
+/* ---- module sections ---------------------------------------------------- */
+
+.dsp__module {
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--color-border-subtle);
+  overflow: hidden;
+}
+
+.dsp__module > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  cursor: default;
+  list-style: none;
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+}
+
+.dsp__module > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dsp__module > summary:hover {
+  background: var(--color-bg-hover);
+}
+
+.dsp__module > summary:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.dsp__chev {
+  display: grid;
+  place-items: center;
+  color: var(--color-text-tertiary);
+  transition: transform var(--duration-base) var(--ease-standard);
+}
+
+.dsp__module[open] .dsp__chev {
+  transform: rotate(180deg);
+}
+
+.dsp__chev svg {
+  width: 14px;
+  height: 14px;
+}
+
+.dsp__module-note {
+  flex: 1;
+  text-align: right;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-tertiary);
+}
+
+.dsp__module-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-4) var(--space-5);
+  border-top: 1px solid var(--color-separator);
+}
+
+.dsp__hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: var(--line-normal);
+}
+
+/* switch — same visual language as the settings dialog */
+.dsp__switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-active);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.dsp__switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+  transition: transform var(--duration-base) var(--ease-emphasized);
+}
+
+.dsp__switch[aria-checked='true'] {
+  background: var(--color-accent);
+}
+
+.dsp__switch[aria-checked='true']::after {
+  transform: translateX(14px);
+  background: var(--color-text-on-accent);
+}
+
+/* ---- band list ---------------------------------------------------------- */
+
+.dsp__bands {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.dsp__band {
+  display: grid;
+  grid-template-columns: 22px 92px 1fr 1fr 1fr 24px;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+}
+
+.dsp__band:hover {
+  background: var(--color-bg-hover);
+}
+
+.dsp__band.is-selected {
+  background: var(--color-bg-selected);
+}
+
+.dsp__band-toggle {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-xs);
+  box-shadow: inset 0 0 0 1px var(--color-border-strong);
+  display: grid;
+  place-items: center;
+  color: transparent;
+}
+
+.dsp__band-toggle[aria-pressed='true'] {
+  background: var(--color-accent);
+  box-shadow: none;
+  color: var(--color-text-on-accent);
+}
+
+.dsp__band-toggle svg {
+  width: 12px;
+  height: 12px;
+}
+
+.dsp__band select {
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: var(--color-bg-input);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  color: var(--color-text-primary);
+  font-size: 11px;
+  padding: 0 var(--space-2);
+}
+
+.dsp__band .dsp__num {
+  height: 24px;
+}
+
+.dsp__band-remove {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-xs);
+  color: var(--color-text-tertiary);
+  display: grid;
+  place-items: center;
+}
+
+.dsp__band-remove:hover {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+
+.dsp__band-remove svg {
+  width: 11px;
+  height: 11px;
+}
+
+.dsp__band-head {
+  display: grid;
+  grid-template-columns: 22px 92px 1fr 1fr 1fr 24px;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
+  font-size: 10px;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.dsp__band-head span:nth-child(n + 3) {
+  text-align: right;
+}
+
+/* ---- meters ------------------------------------------------------------- */
+
+.dsp__meter {
+  position: relative;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-meter-track);
+  overflow: hidden;
+}
+
+.dsp__meter-fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  transform: scaleX(var(--fill, 0));
+  background: var(--color-warning);
+  transition: transform var(--duration-fast) linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dsp__meter-fill {
+    transition: none;
+  }
+}
+
+/* ---- footer ------------------------------------------------------------- */
+
+.dsp__foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--color-separator);
+}
+
+.dsp__foot .dsp__spacer {
+  flex: 1;
+}

@@ -33,6 +33,12 @@
       '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M12 3h5v5M8 17H3v-5M17 3l-6 6M3 17l6-6"/>',
     trash:
       '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M3.5 5.5h13M8 5.5V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5M5.5 5.5l.7 10a1.5 1.5 0 0 0 1.5 1.4h4.6a1.5 1.5 0 0 0 1.5-1.4l.7-10"/>',
+    sliders:
+      '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M3 6h4M11 6h6M3 14h6M13 14h4"/><circle cx="9" cy="6" r="2.1" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="11" cy="14" r="2.1" fill="none" stroke="currentColor" stroke-width="1.7"/>',
+    power:
+      '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M10 3v7M6.2 5.6a5.6 5.6 0 1 0 7.6 0"/>',
+    chevron:
+      '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="m6.5 8 3.5 3.5L13.5 8"/>',
     alert:
       '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M10 7v4M10 14h.01M8.6 3.1 2.2 14.4A1.6 1.6 0 0 0 3.6 16.8h12.8a1.6 1.6 0 0 0 1.4-2.4L11.4 3.1a1.6 1.6 0 0 0-2.8 0Z"/>',
   };
