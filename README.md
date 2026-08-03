@@ -525,6 +525,27 @@ JIT-compiled JavaScript, so it symbolises as a bare address and tells you only "
 in JS". `cpu-profile.js` attaches the V8 profiler over the inspector and names the
 function and line — which is how the rarest-first picker was found.
 
+**A flat JS heap does not mean flat memory.** The heap sat at 24 MB while the process
+grew to 2.7 GB, because WebTorrent's block buffers are Node `Buffer`s living outside
+V8. In `vmmap` they show up as *Memory Tag 255*, which is the number to watch;
+`get-metrics` reports `arrayBuffers` and started-but-unfinished piece count for the
+same reason.
+
+### Known: Buffer growth under sustained high throughput
+
+At a steady ~180 KB/s the main process holds flat (measured 97→108 MB over five
+minutes, the rise tracking wire count). Under a sustained burst — 13.5 MB/s with 35
+wires onto the external drive — it grew from 60 MB to ~300 MB over nine minutes and did
+not fall back when the burst subsided. The JS heap stayed at 19 MB throughout, so the
+growth is Buffer memory (Tag 255: 71 MB dirty plus 204 MB swapped).
+
+For scale, that is roughly a ninth of the original problem at seventy times the
+throughput, and event-loop lag stayed at 7–11 ms, so nothing beachballs. But it is not
+flat, and the most likely explanation is the write-back queue: pieces arrive faster than
+an exFAT USB volume can absorb them. If it needs chasing, bound WebTorrent's pending
+write queue, and use `startedPieces` in the Net panel to confirm the diagnosis before
+changing anything.
+
 `net-probe` reports bytes verified to disk over a fixed window after a warmup.
 Don't tune against `torrent.downloadSpeed` — it is a five-second trailing
 average of raw wire bytes including duplicates and reads zero between bursts.
