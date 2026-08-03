@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
 const net = require('net');
 const dgram = require('dgram');
@@ -57,6 +57,125 @@ function recordError(kind, err) {
 process.on('uncaughtException', (err) => recordError('uncaughtException', err));
 process.on('unhandledRejection', (err) => recordError('unhandledRejection', err));
 
+// -- native crash detection --------------------------------------------------
+//
+// The handlers above cannot see the failure that actually took this app down
+// twice: a SIGSEGV inside utp-native, on the browser main thread. A segfault
+// kills the process at the OS level — no JS runs, nothing is written, and from
+// the user's side the app simply blinks out of existence.
+//
+// Two mechanisms are needed to have any evidence at all:
+//
+//  1. Crashpad writes a native minidump at the moment of the fault. It also
+//     covers renderer and GPU process crashes, which don't reliably produce a
+//     macOS .ips report the way a browser-process crash does.
+//  2. A session sentinel, because a dump tells us *that* it died but nothing
+//     about what the app was doing. The sentinel is rewritten periodically
+//     with live state and deleted on clean quit, so finding one at startup
+//     means the last session ended abnormally — and its contents are the last
+//     known state before it did.
+//
+// Both are local-only. Nothing is uploaded anywhere.
+
+crashReporter.start({ uploadToServer: false, compress: true });
+
+const SESSION_FLAG = path.join(app.getPath('userData'), 'session.running');
+const MAX_LOG_BYTES = 512 * 1024;
+const STARTED_AT = new Date().toISOString();
+
+// What the previous session was doing when it died, or null on a clean start.
+// Read once at startup, before the flag is overwritten.
+let lastAbnormalExit = null;
+
+function readAbnormalExit() {
+  let raw;
+  try {
+    raw = fs.readFileSync(SESSION_FLAG, 'utf8');
+  } catch (_) {
+    return null; // no flag — last quit was clean
+  }
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch (_) {
+    state = { note: 'sentinel unreadable' };
+  }
+  // Force Quit and a power cut leave the same trace as a segfault, so the
+  // wording stays honest about what is actually known. A matching Crashpad
+  // dump is what distinguishes them.
+  state.dumps = latestDumps(state.started);
+  recordError('previous session ended unexpectedly', new Error(JSON.stringify(state, null, 2)));
+  return state;
+}
+
+/** Minidump filenames written since the given ISO timestamp. */
+function latestDumps(sinceIso) {
+  const dir = path.join(app.getPath('crashDumps'), 'completed');
+  const since = sinceIso ? Date.parse(sinceIso) : 0;
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.dmp'))
+      .filter((f) => fs.statSync(path.join(dir, f)).mtimeMs >= since)
+      .slice(-3);
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * Breadcrumbs for the next crash. Cheap enough to run on a timer, and the only
+ * way a native fault leaves any application-level context behind.
+ */
+function writeSessionFlag() {
+  let live = {};
+  try {
+    const d = torrentService.getDiagnostics();
+    const client = torrentService.client;
+    live = {
+      utp: !!(d && d.client && d.client.utp),
+      torrentPort: d && d.client ? d.client.torrentPort : null,
+      downloadSpeed: d && d.client ? Math.round(d.client.downloadSpeed) : null,
+      torrents: client ? client.torrents.length : 0,
+      // Total wires is the number that matters for the utp-native fault: the
+      // crash is socket churn, so a high count here next to a dump is the
+      // signal.
+      wires: client ? client.torrents.reduce((n, t) => n + ((t.wires && t.wires.length) || 0), 0) : 0,
+      inboundNow: d ? d.inboundNow : null,
+      inboundPeak: d ? d.inboundPeak : null,
+    };
+  } catch (_) {
+    /* diagnostics must never be able to break the thing recording the crash */
+  }
+  try {
+    fs.writeFileSync(
+      SESSION_FLAG,
+      JSON.stringify(Object.assign({ pid: process.pid, started: STARTED_AT, updated: new Date().toISOString() }, live))
+    );
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function clearSessionFlag() {
+  try {
+    fs.unlinkSync(SESSION_FLAG);
+  } catch (_) {
+    /* already gone */
+  }
+}
+
+/** Keeps errors.log from growing without bound; halves it when it gets big. */
+function rotateCrashLog() {
+  try {
+    if (fs.statSync(CRASH_LOG).size <= MAX_LOG_BYTES) return;
+    const text = fs.readFileSync(CRASH_LOG, 'utf8');
+    fs.writeFileSync(CRASH_LOG, text.slice(-Math.floor(MAX_LOG_BYTES / 2)));
+  } catch (_) {
+    /* no log yet, or unwritable */
+  }
+}
+
 const store = new Store();
 const torrentService = new TorrentService();
 const piecePolicy = createPiecePolicy({
@@ -88,6 +207,9 @@ const DEFAULT_PREFS = {
   expectedPath: null, // 'auto' | 'direct' | 'vpn' | 'vpn-preferred'
   homeNetwork: null, // fingerprint from netPath.fingerprint()
   peerEncryption: true, // restart-required in both directions
+  // Opt-in, because utp-native segfaults under load — see the note at the
+  // client options in torrent-service.js. Restart-required.
+  enableUtp: false,
 };
 
 let mainWindow = null;
@@ -360,6 +482,13 @@ const trackers = createTrackers({
 });
 
 app.whenReady().then(async () => {
+  rotateCrashLog();
+  // Must read before the new flag is written, or this session overwrites the
+  // evidence from the one that died.
+  lastAbnormalExit = readAbnormalExit();
+  writeSessionFlag();
+  setInterval(writeSessionFlag, 30000).unref();
+
   installStreamCorsHeaders();
   torrentService.setCacheDir(path.join(app.getPath('userData'), 'torrents'));
 
@@ -369,6 +498,7 @@ app.whenReady().then(async () => {
     torrentPort: listen.port,
     uploadLimit: getPrefs().uploadLimit,
     secure: getPrefs().peerEncryption !== false,
+    utp: getPrefs().enableUtp === true,
     trackers,
   });
 
@@ -443,8 +573,11 @@ async function shutdown() {
   try {
     torrentService.destroy();
   } catch (err) {
-    console.warn('[shutdown] torrent teardown:', err.message);
+    console.warn('[shutdown] torrent teardown:', err.stack || err.message);
   }
+  // Last thing, and only on the path that ran teardown: the absence of this
+  // file is the entire signal that the previous session exited cleanly.
+  clearSessionFlag();
 }
 
 app.on('before-quit', (event) => {
@@ -651,6 +784,16 @@ ipcMain.handle('set-pref', (event, key, value) => {
 });
 
 ipcMain.handle('get-app-version', () => app.getVersion());
+
+// Null on a clean start. Non-null means the last session did not shut down —
+// the UI says so once, because an app that silently vanishes and comes back
+// pretending nothing happened is the worst version of this bug.
+ipcMain.handle('get-last-crash', () => lastAbnormalExit);
+
+ipcMain.handle('open-logs-folder', () => {
+  shell.showItemInFolder(CRASH_LOG);
+  return true;
+});
 
 // -- playback priority -----------------------------------------------------
 //

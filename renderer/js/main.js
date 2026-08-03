@@ -80,6 +80,7 @@
     MP.store.state.settings.expectedPath = prefs.expectedPath || 'auto';
     MP.store.state.settings.homeNetwork = prefs.homeNetwork || null;
     MP.store.state.settings.peerEncryption = prefs.peerEncryption !== false;
+    MP.store.state.settings.enableUtp = prefs.enableUtp === true;
     MP.store.state.settings.torrentPort = prefs.torrentPort || null;
     if (prefs.durations) {
       Object.keys(prefs.durations).forEach(function (key) {
@@ -95,6 +96,30 @@
       MP.store.state.settings.defaultDownloadPath = values[1];
       MP.store.state.settings.version = values[2];
     });
+  }
+
+  /**
+   * Say so when the last session died.
+   *
+   * A native crash leaves no trace in the UI: the app vanishes, you reopen it,
+   * and it behaves as though nothing happened — which is why this went
+   * undiagnosed for so long. One toast, only when it actually happened.
+   */
+  function reportLastCrash() {
+    if (!window.playerAPI.getLastCrash) return;
+    window.playerAPI.getLastCrash().then(function (info) {
+      if (!info) return;
+      var native = info.dumps && info.dumps.length;
+      MP.toast.show(
+        native
+          ? 'The app crashed last session' + (info.utp ? ' with µTP enabled' : '') + '. Details written to errors.log.'
+          : 'The app closed unexpectedly last session. Details written to errors.log.',
+        {
+          duration: 12000,
+          action: { label: 'Show log', onClick: function () { window.playerAPI.openLogsFolder(); } },
+        }
+      );
+    }).catch(function () {});
   }
 
   function boot() {
@@ -135,6 +160,8 @@
       .then(function (list) {
         (list || []).forEach(function (t) { MP.store.upsertTorrent(t); });
         MP.api.ready();
+        // Last, so a crash notice doesn't compete with the library loading in.
+        reportLastCrash();
       })
       .catch(function (err) {
         showFatal('Startup failed: ' + (err && err.message ? err.message : String(err)));

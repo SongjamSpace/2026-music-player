@@ -360,6 +360,28 @@
     }
   }
 
+  function paintUtp(diag) {
+    var el = settingsDlg.querySelector('#net-utp');
+    var sw = settingsDlg.querySelector('#switch-utp');
+    if (!el || !sw) return;
+    var pref = MP.store.state.settings.enableUtp === true;
+    var effective = !!(diag.client && diag.client.utp);
+    sw.setAttribute('aria-checked', pref ? 'true' : 'false');
+
+    if (pref !== effective) {
+      set(el, (pref ? 'On' : 'Off') + ' after restart — currently ' + (effective ? 'on' : 'off'), 'is-warn');
+      return;
+    }
+    if (!effective) {
+      set(el, 'Off — TCP only', '');
+      return;
+    }
+    // Deliberately not 'is-good' when on: this is the setting that crashes.
+    var p = diag.torrent && diag.torrent.peers;
+    var n = p ? (p.utpIn || 0) + (p.utpOut || 0) : 0;
+    set(el, 'On · ' + n + ' µTP peers · may crash', 'is-warn');
+  }
+
   function refreshNet() {
     window.playerAPI.getDiagnostics(MP.store.state.selectedTorrentId).then(function (diag) {
       if (!diag) return;
@@ -373,6 +395,7 @@
         settingsDlg.querySelector('#select-expected-path').value = np.expected || 'auto';
       }
       paintEncryption(diag);
+      paintUtp(diag);
     });
   }
 
@@ -546,6 +569,18 @@
     bindSwitch(settingsDlg.querySelector('#switch-encryption'), MP.store.state.settings.peerEncryption !== false, function (on) {
       MP.store.state.settings.peerEncryption = on;
       window.playerAPI.setPref('peerEncryption', on).then(refreshNet);
+    });
+
+    bindSwitch(settingsDlg.querySelector('#switch-utp'), MP.store.state.settings.enableUtp === true, function (on) {
+      MP.store.state.settings.enableUtp = on;
+      window.playerAPI.setPref('enableUtp', on).then(function () {
+        refreshNet();
+        MP.toast.show(
+          on
+            ? 'µTP will be enabled after a restart. If the app starts vanishing, turn it back off.'
+            : 'µTP will be disabled after a restart.'
+        );
+      });
     });
 
     settingsDlg.querySelectorAll('[data-close]').forEach(function (btn) {

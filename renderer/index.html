@@ -354,6 +354,19 @@
           </div>
           <button type="button" class="switch" id="switch-encryption"></button>
         </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Enable µTP</div>
+            <div class="setting-row__value" id="net-utp">—</div>
+            <div class="setting-row__desc">
+              Adds the UDP-based BitTorrent transport, reaching peers that don't accept TCP.
+              Off by default because the µTP library crashes the app under heavy peer churn —
+              a native fault that can't be caught, so the app disappears without warning.
+              Turn it on only if a torrent is starved for peers. Takes effect after a restart.
+            </div>
+          </div>
+          <button type="button" class="switch" id="switch-utp"></button>
+        </div>
       </div>
 
       <div class="settings-group">

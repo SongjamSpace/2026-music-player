@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('playerAPI', {
   getPrefs: () => ipcRenderer.invoke('get-prefs'),
   setPref: (key, value) => ipcRenderer.invoke('set-pref', key, value),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  getLastCrash: () => ipcRenderer.invoke('get-last-crash'),
+  openLogsFolder: () => ipcRenderer.invoke('open-logs-folder'),
 
   // Carries the play head as well as the track indices, so main can size the
   // readahead window around where the listener actually is.

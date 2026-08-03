@@ -209,7 +209,24 @@ class TorrentService {
         // Must differ from torrentPort: webtorrent binds the uTP server on the
         // same numeric port as TCP, over UDP, so DHT would collide with it.
         dhtPort: torrentPort ? torrentPort + 1 : 0,
-        utp: true,
+        // Off by default, and this is a stability decision, not a performance
+        // one. utp-native 2.5.3 (a transitive dep of webtorrent 1.9.7) has a
+        // use-after-free: libutp's 500 ms timeout sweep can free a UTPSocket
+        // and then fire its state-change callback into JS on the freed object.
+        //
+        //   utp_check_timeouts -> ~UTPSocket() -> utp_call_on_state_change
+        //     -> napi_make_callback -> SIGSEGV on CrBrowserMain
+        //
+        // That is a native segfault, so no uncaughtException handler can catch
+        // it and the app vanishes without writing anything. It was always
+        // latent — webtorrent enables uTP whenever utp-native is installed
+        // (index.js:81, `opts.utp !== false`) — but raising maxConns and
+        // getting inbound working on a forwarded port multiplied the socket
+        // churn enough to hit it regularly.
+        //
+        // Losing uTP costs the uTP-only peers in a swarm. TCP inbound on the
+        // forwarded port is unaffected and remains the bulk of the peers.
+        utp: opts.utp === true,
         // MSE/RC4 protocol obfuscation. Not privacy — every peer still sees our
         // address, and DHT and tracker traffic stay in the clear — but it
         // defeats protocol-signature shaping, which is a common cause of a
