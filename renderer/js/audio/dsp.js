@@ -250,6 +250,35 @@
     return Object.keys(D.BUILTIN_PRESETS).concat(Object.keys(state.presets));
   }
 
+  /**
+   * Has the user edited anything since `lastPreset` was recalled or saved?
+   *
+   * This is the whole reason the preset list can be honest. A named preset in
+   * the box after three drags of the curve is a lie, and it is the lie that
+   * makes A/B confusing: the label has to describe the parameters actually
+   * loaded, not the last button pressed.
+   */
+  function isPresetModified() {
+    if (!state.lastPreset || !state.presetBasis) return false;
+    // Compared against the live state rather than a snapshot of it: this runs
+    // on every dsp:state emit, which includes every frame of a curve drag.
+    return D.PRESET_KEYS.some(function (key) {
+      return !D.deepEqual(state[key], state.presetBasis[key]);
+    });
+  }
+
+  /** True when `lastPreset` still names a preset that exists. */
+  function hasPresetBasis() {
+    return !!state.lastPreset &&
+      (isBuiltinPreset(state.lastPreset) ||
+        Object.prototype.hasOwnProperty.call(state.presets, state.lastPreset));
+  }
+
+  function markPresetClean(name) {
+    state.lastPreset = name;
+    state.presetBasis = name ? D.presetSnapshot(state) : null;
+  }
+
   function applyPreset(name) {
     var preset = D.BUILTIN_PRESETS[name] || state.presets[name];
     if (!preset) return false;
@@ -269,6 +298,9 @@
     next.enabled = state.enabled;
     next.presets = state.presets;
     state = next;
+    // After normalise, so the basis is in the same canonical shape every later
+    // snapshot will be — otherwise a freshly applied preset reads as modified.
+    markPresetClean(name);
     MP.store.state.dsp = state;
     if (available) MP.dspGraph.applyAll(state, { regenerateIr: state.reverb.on });
     MP.store.emit('dsp:state', state);
@@ -279,7 +311,7 @@
   function savePreset(name) {
     if (!name) return false;
     state.presets[name] = D.presetSnapshot(state);
-    state.lastPreset = name;
+    markPresetClean(name);
     MP.store.emit('dsp:state', state);
     saveNow();
     return true;
@@ -288,6 +320,9 @@
   function deletePreset(name) {
     if (!state.presets[name]) return false;
     delete state.presets[name];
+    // The parameters stay loaded — only the name they were loaded under is
+    // gone, so the list should say Custom rather than point at nothing.
+    if (state.lastPreset === name) markPresetClean(null);
     MP.store.emit('dsp:state', state);
     saveNow();
     return true;
@@ -302,6 +337,8 @@
     fresh.corsOk = state.corsOk;
     fresh.presets = state.presets;
     state = fresh;
+    // Defaults are exactly Flat, so say so instead of showing it as modified.
+    markPresetClean('Flat');
     MP.store.state.dsp = state;
     if (available) MP.dspGraph.applyAll(state, { regenerateIr: false });
     MP.store.emit('dsp:state', state);
@@ -310,6 +347,13 @@
 
   // -- A/B -------------------------------------------------------------------
 
+  /**
+   * A and B are two independent parameter states you can flip between to
+   * compare. Each slot remembers its own preset identity as well as its
+   * parameters, so the preset box describes whichever slot you are hearing —
+   * a slot seeded from Bass Boost and then edited reads "Bass Boost —
+   * modified" no matter what the other slot was doing.
+   */
   var slots = { A: null, B: null };
   var activeSlot = 'A';
 
@@ -317,27 +361,55 @@
     return activeSlot;
   }
 
+  function captureSlot() {
+    return {
+      params: D.presetSnapshot(state),
+      lastPreset: state.lastPreset,
+      presetBasis: state.presetBasis ? D.clone(state.presetBasis) : null,
+    };
+  }
+
   function abSwitch(slot) {
     if (slot === activeSlot) return;
-    slots[activeSlot] = D.presetSnapshot(state);
+    slots[activeSlot] = captureSlot();
     activeSlot = slot;
-    if (slots[slot]) {
-      var merged = Object.assign(D.clone(state), D.clone(slots[slot]));
+    var target = slots[slot];
+    if (target) {
+      var merged = Object.assign(D.clone(state), D.clone(target.params));
       var next = D.normalise(merged);
       next.corsOk = state.corsOk;
       next.enabled = state.enabled;
       next.presets = state.presets;
+      next.lastPreset = target.lastPreset;
+      next.presetBasis = target.presetBasis ? D.clone(target.presetBasis) : null;
       state = next;
       MP.store.state.dsp = state;
       if (available) MP.dspGraph.applyAll(state, { regenerateIr: state.reverb.on });
     }
+    // An untouched slot starts as a copy of what you were just hearing, which
+    // is what makes "switch to B, tweak, compare" the natural first move.
     MP.store.emit('dsp:state', state);
   }
 
+  /** Copies the live settings onto the other slot. Returns that slot's name. */
   function abCopy() {
     var other = activeSlot === 'A' ? 'B' : 'A';
-    slots[other] = D.presetSnapshot(state);
+    slots[other] = captureSlot();
     MP.store.emit('dsp:state', state);
+    return other;
+  }
+
+  /** A one-line description of a slot, for the A/B button tooltips. */
+  function abDescribe(slot) {
+    if (slot === activeSlot) return describe(state.lastPreset, isPresetModified());
+    var held = slots[slot];
+    if (!held) return 'empty — starts from the current settings';
+    return describe(held.lastPreset, !D.deepEqual(held.params, held.presetBasis));
+  }
+
+  function describe(name, modified) {
+    if (!name) return 'Custom';
+    return name + (modified ? ' — modified' : '');
   }
 
   // -- persistence -----------------------------------------------------------
@@ -376,10 +448,13 @@
     savePreset: savePreset,
     deletePreset: deletePreset,
     isBuiltinPreset: isBuiltinPreset,
+    isPresetModified: isPresetModified,
+    hasPresetBasis: hasPresetBasis,
     resetAll: resetAll,
     abSlot: abSlot,
     abSwitch: abSwitch,
     abCopy: abCopy,
+    abDescribe: abDescribe,
     persist: function () { if (persist) persist(); },
     persistNow: saveNow,
     graph: function () { return MP.dspGraph; },

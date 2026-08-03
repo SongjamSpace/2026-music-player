@@ -4,7 +4,26 @@ A personal music-first media player that streams and downloads torrents via magn
 
 **Repo:** [SongjamSpace/2026-music-player](https://github.com/SongjamSpace/2026-music-player)
 
-## Run
+## Install as a Mac app
+
+```bash
+npm install
+npm run install-app     # builds, then copies to /Applications
+```
+
+Then launch it from Spotlight, Launchpad or the Dock like any other app —
+no terminal needed. `npm run build` alone leaves the bundle in `dist/`.
+
+The build is **ad-hoc signed**, not notarised: it's a personal build, and Apple
+silicon refuses to launch unsigned native code at all. Because it's built
+locally it carries no quarantine flag, so Gatekeeper doesn't prompt. If you ever
+move it between machines, right-click → Open the first time.
+
+The packaged app and `npm start` deliberately share one data directory
+(`~/Library/Application Support/2026-music-player`), so your library, presets
+and cached torrent metadata are the same in both.
+
+## Run from source
 
 ```bash
 npm install
@@ -19,13 +38,20 @@ npm install
 ```
 
 **Launching from a VS Code terminal?** The extension host exports
-`ELECTRON_RUN_AS_NODE=1`, which makes Electron boot as plain Node and fail with
-`Cannot read properties of undefined (reading 'whenReady')`. Either use a normal
-Terminal window or unset it:
+`ELECTRON_RUN_AS_NODE=1`, which makes Electron boot as plain Node. From source
+that fails loudly with `Cannot read properties of undefined (reading
+'whenReady')`; the packaged app fails *silently*, exiting 0 with no window and
+no error, because Node is handed no script to run. `open` forwards your shell
+environment, so this bites there too. Either use a normal Terminal window or
+unset it:
 
 ```bash
 env -u ELECTRON_RUN_AS_NODE npm start
+env -u ELECTRON_RUN_AS_NODE open -a "2026 Music Player"
 ```
+
+Launching from Finder, Spotlight or the Dock is unaffected — `launchctl getenv
+ELECTRON_RUN_AS_NODE` is empty, so LaunchServices never sees it.
 
 ### Debugging
 
@@ -93,7 +119,12 @@ Media keys and the macOS Now Playing widget work via `navigator.mediaSession`.
 - **Electron** – desktop shell
 - **WebTorrent** – torrent client and HTTP streaming server (range requests for seeking)
 - **electron-store** – persists magnet URIs, download path, and a `prefs` object
-  (theme, volume, shuffle/repeat, learned track durations)
+  (theme, volume, shuffle/repeat, learned track durations, listen port, upload
+  limit, piece strategy)
+- **@silentbot1/nat-api** – UPnP-IGD / NAT-PMP port mapping. ESM-only, so it is
+  reached through a dynamic `import()` from CommonJS main; this is also why the
+  packaged build sets `asar: false` (Electron 28 can't dynamic-import ESM from
+  inside an asar archive, and it fails only in the packaged app)
 
 ### Metadata cache
 
@@ -113,6 +144,216 @@ that folder into a local-only torrent (`announce: []`, so nothing is
 advertised) and serves it through the normal pipeline. The library id stays
 keyed to the original magnet via an alias map, and the generated `.torrent` is
 cached as `<infoHash>.local.torrent` so it resolves instantly from then on.
+
+Alongside it, `<infoHash>.modtimes.json` records each file's modification time
+once the torrent completes. WebTorrent re-hashes every byte of every restored
+torrent on launch unless it is given these, which means a library of finished
+albums spends minutes saturating the same thread the downloader runs on, right
+when you want to press play. With them, an untouched file set is trusted after
+one `stat()` per file. (Not `skipVerify`, which trusts the disk blindly and
+would happily serve a truncated file as valid audio.)
+
+## Download speed
+
+The torrent client is tuned rather than left at library defaults, because those
+defaults are conservative in ways that cost real throughput.
+
+- **Fixed listen port**, chosen at random once per install and persisted. An
+  ephemeral port can't be forwarded, and peers that learned the address via DHT
+  or PEX can't reconnect after a restart. If the port is already taken — usually
+  a second copy of the app — it falls back to an ephemeral one for that session
+  and says so in Settings, because a failed listen makes WebTorrent destroy the
+  whole client and nothing downloads at all.
+- **Router port mapping** via UPnP-IGD or NAT-PMP (`main/nat.js`). Without an
+  open port the client is outbound-only: invisible to everyone who finds it
+  through DHT, PEX or a tracker. On the small swarms an album lives on that is
+  frequently the difference between three peers and twenty. Every call is
+  deadline-guarded — a router that ignores SSDP simply never answers — and
+  failure is reported with the specific thing to go fix. NAT-PMP and UPnP are
+  attempted as separate single-protocol clients rather than together, purely so
+  the UI can say *which* one worked; that matters when it later stops working.
+
+  A mapping succeeding is not the same as being reachable, so three things are
+  detected and reported distinctly: **CGNAT** (the ISP handed the router a
+  `100.64/10` address, so there is no public address to forward), **double NAT**
+  (the router's WAN address is private), and **VPN egress**. The last one is the
+  easy trap: VPN clients install `0.0.0.0/1` and `128.0.0.0/1` routes that beat
+  the default route without replacing it, so the gateway still looks like the
+  LAN router while every packet leaves through a tunnel — and the port forward,
+  though real, is not in the path. That is detected locally by asking the kernel
+  which source address it would use to reach the internet (`connect()` on a UDP
+  socket performs the routing lookup without sending a packet), so there is no
+  third-party IP-echo service involved.
+
+  None of these are reported as "peers can't reach you", because that isn't
+  reliably true — inbound connections do arrive in some VPN and CGNAT setups.
+  The mechanism goes in Settings; the verdict comes from the live inbound peer
+  count in the Connection panel, which is the only real evidence.
+- **Default trackers** (`main/trackers.js`). A magnet carries only the `tr=`
+  params whoever made it chose to include, often none. A curated list is merged
+  into every add and refreshed daily from `ngosang/trackerslist`, cached to
+  `<userData>/trackers.txt` so it works offline. `ws://` trackers are excluded:
+  they return only WebRTC peers, which a Node client can't dial.
+- **`maxConns: 120`** per torrent, up from WebTorrent's 55.
+- **A default upload cap of 1.5 MB/s**, which sounds backwards but isn't — a
+  saturated uplink queues the TCP acknowledgements your *downloads* depend on.
+  Configurable in Settings. Never set it to zero: peers reciprocate.
+- **Whole-torrent download with playback priority**, not current-track-only.
+  Restricting to two files leaves most peers with nothing to send you; breadth
+  is what makes a swarm fast. The playing track, the next one and the cover art
+  get explicit priority on top (`main/torrent-service.js`).
+- **Hybrid piece strategy** (`main/piece-policy.js`). Sequential while the play
+  head is exposed, rarest-first once there's runway, with a wide hysteresis band
+  so it can't flap. Rarest-first is what earns unchokes; sequential is what
+  avoids stalls.
+- **A 30-second readahead window** around the play head, replacing WebTorrent's
+  two-piece one. The critical set is garbage-collected on every tick, which the
+  library itself never does — left alone it grows for the life of the torrent
+  and burns bandwidth on duplicate block requests.
+
+**Settings → Network** shows whether the port is mapped and, when it isn't, what
+to do about it. The **Connection** panel under any album header names the actual
+bottleneck: no inbound peers means the router; few peers all sending means the
+swarm is just small and there is nothing to fix.
+
+### Which way traffic actually leaves
+
+A port forward is worthless if packets don't go through the router that has it.
+VPN clients install `0.0.0.0/1` and `128.0.0.0/1` routes, which beat the default
+route without replacing it — so the gateway still *looks* like the LAN router
+while every packet leaves through a tunnel. `main/net-path.js` measures the real
+answer instead of inferring it, and Settings → Network reports it.
+
+- **Traffic path** — the interface actually in use, from a `dgram` `connect()`
+  that performs the routing lookup without sending a packet.
+- **Interface reachability** — per interface, a TCP connect to `1.1.1.1:443`
+  with `localAddress` set. Two IP-literal targets so a single filtered anycast
+  host can't be mistaken for a dead interface, no hostname so a tunnel-bound
+  resolver can't poison the result, and `ECONNREFUSED` counts as *reachable*
+  because something answered. Each interface's gateway is probed separately,
+  which is what distinguishes "cable unplugged" from "cable fine, routes point
+  elsewhere".
+- **Expect traffic to leave via** — a check, not a switch. It moves no traffic;
+  it tells the app which situation to warn about. `VPN preferred` is the
+  split-tunnel mode: VPN up with torrents direct reads as success, the VPN
+  dropping is a neutral notice (downloads continue), and torrents being pulled
+  back into the tunnel is the warning, because that's when inbound peers vanish.
+- **Home network** — fingerprinted by the router's MAC from the local ARP cache,
+  because every home router is `192.168.x.1` but the MAC is specific. Used for
+  one thing: going direct on a network you haven't vouched for is flagged, and
+  that flag outranks every other verdict.
+
+Nothing here contacts an outside server except **Check public IP**, which is a
+button and is never pressed on your behalf.
+
+```bash
+node scripts/net-path-check.js      # ground truth in ~1s
+```
+
+### The listen port is the whole ballgame
+
+If downloads sit at 0 B/s on a torrent that clearly has seeders, this is almost
+always why, and no amount of client tuning touches it.
+
+**A peer behind NAT cannot connect to another peer behind NAT.** One side has to
+be able to *accept* a connection. Big public swarms contain seedboxes with open
+ports, so you can always dial someone. A small album swarm is entirely
+residential clients — if you also have no open port, there is nobody either of
+you can reach. Measured on this machine, speed tracks exactly one number, the
+fraction of a swarm that will accept a connection, and tracks nothing else:
+
+| swarm | seeders | addresses | dialable | speed |
+|---|---|---|---|---|
+| Ubuntu 26.04 | 2737 | 60 | 9 (23 %) | 25–35 MB/s |
+| Daft Punk | 50 | 45 | 3 (8 %) | 3.4 MB/s |
+| GTA V | 5 | 4 | 1 (25 %) | completed, 2.3 GB |
+| Kill Bill | 9 | 48 | **0** | frozen at 23 % |
+
+Not seeder count. Not tracker health, DHT node count, connection limits or piece
+strategy. Only reachability.
+
+**So get an open port and put it in Settings → Network → Listen port.** The only
+reliable source of one behind CGNAT is a VPN provider that offers port
+forwarding — AirVPN, ProtonVPN (paid) and PIA do; NordVPN does not, on any
+platform. Set the app's listen port to the port your provider forwards you, and
+restart. Router UPnP is skipped automatically whenever traffic egresses a
+tunnel, because the router is not in the path and claiming a mapping there would
+be a lie.
+
+**The proof is inbound peers, not a config screen.** Settings reports
+*"N peers have connected in on port 48764"* — that sentence can only be true if
+the forward really works. When it reads *"No incoming connections yet"*, check
+the forwarded port in your provider's control panel still matches.
+
+This one change took two torrents that had written zero bytes in two hours to
+80 % and 18 % within minutes, with seeders finally dialing in.
+
+**Why there is no "bypass the VPN" switch.** Node exposes only source-address
+binding (`localAddress`), which does not change route selection — a socket bound
+to the LAN address still tries to egress the tunnel and is refused
+`EHOSTUNREACH` in about a millisecond. `ping -S`, `curl --interface` and the
+app's own preflight all agree. Per-application split tunnelling is also
+unavailable on macOS: Apple's `pf`, unlike FreeBSD's, has no `user`/`group`
+match, so no `route-to` rule can mean "this app". A control that looked like it
+moved traffic would be a lie, so there isn't one.
+
+### When a torrent still won't move
+
+Press **Check reachability** in the Connection panel under any album. It asks
+the trackers who is in the swarm, then tries to open a connection to each one,
+and reports what it found:
+
+```
+16 peers known · 2 of 16 reachable (12%) · tracker says 13 seeds / 3 leech · fastest 242ms
+```
+
+`0 reachable` with a healthy seeder count means every peer is behind a NAT that
+won't accept connections — which, if your own port is forwarded, means the swarm
+genuinely cannot serve you and nothing in this app can change that. That is a
+real answer, and it is better than a silent 0 B/s.
+
+### Peer encryption
+
+On by default. MSE/RC4 obfuscation, which makes the protocol harder for an ISP
+to fingerprint and throttle. Three things it is not:
+
+- **Not privacy.** Every peer still sees your address, and DHT and tracker
+  traffic are in the clear regardless.
+- **Not universal.** WebTorrent only runs the encryption handshake for TCP
+  peers; uTP peers are plaintext by construction.
+- **Not all-or-nothing.** A peer whose encrypted connect fails is retried in the
+  clear, so the encrypted fraction never reaches 100%.
+
+Settings reports it as `12 of 18 TCP peers encrypted` — out of the peers that
+*could* be encrypted, not out of all of them, so uTP and web seeds don't make a
+working setting look broken. Toggling is restart-only in both directions:
+`enableSecure()` flips a module-level global in webtorrent with no way to unset
+it, and the row says so rather than pretending the change took.
+
+```bash
+node scripts/net-path-check.js --encryption 90   # measure it against a real swarm
+```
+
+### Measuring it
+
+```bash
+node scripts/net-probe.js --torrent ubuntu --profile tuned    # or baseline
+node scripts/selection-check.js                               # regression check
+```
+
+`net-probe` reports bytes verified to disk over a fixed window after a warmup.
+Don't tune against `torrent.downloadSpeed` — it is a five-second trailing
+average of raw wire bytes including duplicates and reads zero between bursts.
+`--profile baseline` reproduces the original zero-option client, so runs are
+directly comparable; alternate A/B/A/B rather than doing all of one then all of
+the other, since swarm population drifts over tens of minutes. `MP_TORRENT_PROFILE=baseline`
+does the same thing to the real app.
+
+`selection-check` guards the playback-priority diff. The bug it exists for was
+invisible: `file.select(1)` paired with a `file.deselect()` hardcoded to
+priority 0 never matched, so every play, seek and shuffle appended another
+permanent entry to an array that gets re-sorted on every piece update. Two
+hundred track changes left 533 selections behind; the fix holds at 3.
 
 ## Renderer architecture
 
@@ -161,6 +402,22 @@ The 500 ms progress tick emits only `torrent:progress:<id>`, each row early-outs
 on unchanged rounded values, and meters animate `transform: scaleX()` rather
 than `width`, so a steady-state tick does no layout at all.
 
+**Stacking.** Every `z-index` comes from the `--z-*` scale in
+`tokens.primitives.css`, so the order is legible in one place. Toasts are the
+exception and deliberately have no place in it: the container is a
+`popover="manual"` promoted into the browser's **top layer**, because modal
+`<dialog>`s live there too and no z-index can beat them. Top-layer order is
+order of entry, so the stack re-promotes itself on every toast. Panels call
+`MP.toast.reserve(key, rect)` to declare the space they occupy and the stack
+slides clear rather than overlapping — falling back to overlapping, still on
+top, when the window is too narrow to dodge.
+
+**Overlays.** The titlebar is a 52px `-webkit-app-region: drag` strip. That
+region is handed to the OS, which hit tests it *before* the page sees the event,
+so a floating panel overlapping it is dead to clicks no matter how high its
+z-index. Every `<body>`-level overlay must declare `-webkit-app-region: no-drag`
+— the list lives next to the titlebar rule in `layout.css`.
+
 **Web Audio.** A `MediaElementAudioSourceNode` on CORS-tainted media outputs
 silence, and adopting an element is irreversible — a second call throws, and
 closing the context doesn't release it. So the media elements load with
@@ -172,7 +429,11 @@ dropped, the result is remembered, and playback continues without effects.
 Modules are disabled by setting neutral parameters rather than rewiring: a
 peaking biquad at 0 dB is exactly unity, so "off" is genuinely transparent.
 Reverb is the one exception — a convolver runs regardless of its output gain, so
-its input is disconnected.
+its input is disconnected. The brief duck used for the few things that can't be
+automated (filter type, IR swap) is reference counted against a declared resting
+level: `AudioParam.value` is live during a ramp, so sampling it on entry let one
+duck capture another's fade-out as "the level to restore" and leave the chain at
+zero permanently.
 
 **IPC.** `js/api.js` subscribes to each channel exactly once and fans out with
 real unsubscribe functions. Nothing else may call `playerAPI.on*`: there's no

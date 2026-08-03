@@ -70,9 +70,10 @@
           stateEl.innerHTML = MP.icons.svg('check', 15);
         } else {
           stateEl.textContent = '';
-          // A file at 0% isn't stalled — setFilePriorities actively deselected
-          // it in favour of the current and next track. Saying "0%" reads as
-          // broken; "Queued" is what's actually true.
+          // A file at 0% isn't stalled — every file in the torrent is wanted,
+          // but the playing and next tracks are prioritised ahead of it, so a
+          // track late in the album legitimately sits at zero for a while.
+          // "0%" reads as broken; "Queued" is what's actually true.
           dlEl.textContent = pct === 0 ? 'Queued' : pct + '%';
         }
       },
@@ -163,13 +164,15 @@
       return;
     }
 
-    var playableCount = t.files.filter(MP.util.isPlayable).length;
-    if (playableCount === 0) {
+    // Only bail out when there's no media at all. A torrent full of formats we
+    // can't decode still lists them — seeing "Unsupported" beside real track
+    // names is more useful than an empty pane.
+    if (!t.files.some(MP.util.isMediaFile)) {
       headEl.hidden = true;
       MP.empty.render(listEl, {
         glyph: 'alert',
-        title: 'No playable media in this torrent',
-        body: 'None of these files are in a format this player can decode. You can still open the folder and play them elsewhere.',
+        title: 'No audio or video in this torrent',
+        body: 'This torrent contains no media files this player can list. You can still open the folder to see what it holds.',
         action: { label: 'Reveal in Finder', onClick: function () { MP.actions.openTorrentFolder(id); } },
       });
       return;
@@ -178,18 +181,25 @@
     listEl.textContent = '';
     headEl.hidden = false;
 
-    // Cover images are consumed as artwork, not listed as tracks — they're
-    // shown on the album tile instead. Numbering stays contiguous.
+    // Only media is listed. Images become the album artwork, and everything
+    // else — cue sheets, rip logs, .accurip/.toc checksums, readmes — is
+    // packaging, not tracks. Numbering stays contiguous over what's shown.
     var ordinal = 0;
     var first = null;
+    var hidden = 0;
     t.files.forEach(function (file, index) {
-      if (MP.util.isImageFile(file)) return;
+      if (!MP.util.isMediaFile(file)) {
+        if (!MP.util.isImageFile(file)) hidden++;
+        return;
+      }
       ordinal++;
       var row = createRow(t, file, index, ordinal);
       rows.set(index, row);
       listEl.appendChild(row.el);
       if (first === null) first = index;
     });
+
+    if (hidden) listEl.appendChild(buildHiddenNote(hidden, id));
 
     if (first !== null) rows.get(first).setSelected(true);
     focusedIndex = first === null ? 0 : first;
@@ -199,6 +209,24 @@
   }
 
   var SWARM_TIMEOUT_MS = 25000;
+
+  /**
+   * Hidden files are still on disk, so say how many rather than making them
+   * vanish without a trace.
+   */
+  function buildHiddenNote(count, torrentId) {
+    var note = MP.util.el('li', 'tracklist__note');
+    note.appendChild(
+      MP.util.el('span', null, count + (count === 1 ? ' other file' : ' other files') + ' — cue sheets, logs and checksums')
+    );
+    var reveal = MP.util.el('button', 'btn btn--ghost', 'Reveal in Finder');
+    reveal.type = 'button';
+    reveal.addEventListener('click', function () {
+      MP.actions.openTorrentFolder(torrentId);
+    });
+    note.appendChild(reveal);
+    return note;
+  }
 
   function updateSkeletonCaption(t) {
     if (!skeletonCaption) return;

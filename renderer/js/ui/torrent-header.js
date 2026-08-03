@@ -7,7 +7,7 @@
 
   function metaText(t) {
     var parts = [];
-    var count = t.files ? t.files.length : 0;
+    var count = t.mediaCount != null ? t.mediaCount : t.files ? t.files.length : 0;
     if (count) parts.push(count === 1 ? '1 track' : count + ' tracks');
     if (t.length) parts.push(MP.util.formatBytes(t.length));
     if (t.done) {
@@ -15,6 +15,10 @@
     } else {
       parts.push(Math.round((t.progress || 0) * 100) + '%');
       parts.push(t.numPeers ? t.numPeers + (t.numPeers === 1 ? ' peer' : ' peers') : 'no peers');
+      // formatSpeed renders 0 as an em dash, which reads as "stalled" — that's
+      // the intent, since downloadSpeed is a trailing average and genuinely
+      // sits at zero between bursts.
+      if (t.downloadSpeed) parts.push(MP.util.formatSpeed(t.downloadSpeed));
       var eta = MP.util.formatETA(t.timeRemaining);
       if (eta && t.numPeers) parts.push(eta);
     }
@@ -83,6 +87,10 @@
     removeBtn.addEventListener('click', function () {
       if (currentId) MP.actions.removeTorrent(currentId, false);
     });
+
+    // Mounted here rather than in index.html so the panel owns its own markup
+    // and can be lifted out without leaving an empty container behind.
+    MP.netPanel.init(root.querySelector('.torrent-header__body'));
 
     MP.store.subscribe('selection', onSelection);
     MP.store.subscribe('torrents:list', function () {

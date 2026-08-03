@@ -11,7 +11,7 @@
 
 .dsp {
   position: fixed;
-  z-index: 130; /* above .menu (120) and .transport (50) */
+  z-index: var(--z-panel);
   display: flex;
   flex-direction: column;
   width: 560px;
@@ -55,7 +55,8 @@
 
 .dsp__select {
   height: 28px;
-  max-width: 150px;
+  /* Wide enough for the longest built-in plus the " — modified" suffix. */
+  max-width: 190px;
   padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-sm);

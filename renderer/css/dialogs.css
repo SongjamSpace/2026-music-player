@@ -210,6 +210,56 @@ dialog[open] {
   user-select: text;
 }
 
+/* Network status. The colour is the whole point: "not mapped" is the difference
+   between a fast download and a slow one, so it can't read as ordinary text. */
+.setting-row__value.is-good {
+  color: var(--color-success);
+}
+.setting-row__value.is-warn {
+  color: var(--color-warning);
+}
+.setting-row__value.is-bad {
+  color: var(--color-danger);
+}
+
+/* A short numeric field that sits inline in a setting row, next to its button —
+   unlike .field inputs, which are full-width block controls in a form. */
+.input-compact {
+  flex: 0 0 auto;
+  width: 96px;
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-input);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  user-select: text;
+}
+
+.input-compact:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--color-focus);
+}
+
+/* select */
+.select {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface-raised);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+}
+
+.select:hover {
+  background: var(--color-bg-active);
+}
+
 /* switch */
 .switch {
   position: relative;

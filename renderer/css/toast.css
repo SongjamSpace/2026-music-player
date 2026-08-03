@@ -1,17 +1,49 @@
 /* ============================================================================
    TOASTS — bottom-right, stacked above the transport.
+
+   The container is a popover, so it renders in the top layer and cannot be
+   covered by anything — not the DSP panel, not a modal dialog. The z-index
+   below is only the fallback for the case where showPopover() is unavailable
+   or throws; it beats the panel but would still lose to a modal.
+
+   --toasts-right is driven from JS: panels reserve the space they occupy and
+   the stack slides clear of them rather than sitting on top.
    ========================================================================= */
 
 .toasts {
+  /* Reset the UA popover styles, which would otherwise centre this in a
+     bordered, opaque box: [popover] ships inset:0, margin:auto, a border,
+     padding and background-color:canvas. */
+  inset: auto;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  overflow: visible;
+
   position: fixed;
-  right: var(--space-6);
+  right: var(--toasts-right, var(--space-6));
   bottom: calc(var(--transport-height) + var(--space-5));
-  z-index: 100;
+  z-index: var(--z-toast-fallback);
   display: flex;
   flex-direction: column-reverse;
   gap: var(--space-3);
   width: min(360px, calc(100vw - var(--space-10)));
   pointer-events: none;
+  transition: right var(--duration-base) var(--ease-standard);
+}
+
+/* The `display: flex` above is load-bearing twice over. It overrides the UA
+   `[popover]:not(:popover-open) { display: none }`, so a failed showPopover()
+   degrades to a normal stacked element instead of no notifications at all —
+   and it means the hide/show that re-promotes the stack never flips this to
+   `none`, so toasts already on screen don't replay their entry animation. */
+
+@media (prefers-reduced-motion: reduce) {
+  .toasts {
+    transition: none;
+  }
 }
 
 .toast {

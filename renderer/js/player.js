@@ -10,6 +10,7 @@
   var queuePos = -1;
   var watchdog = null;
   var lastTimeAt = 0;
+  var lastPositionSync = 0; // play head last reported to main, in seconds
   var corsRetried = {}; // src → already retried without CORS, so we don't loop
 
   var WATCHDOG_MS = 12000;
@@ -70,23 +71,31 @@
   }
 
   /**
-   * Tell the main process which two files to prioritise. The old code hardcoded
-   * fileIndex + 1, which under shuffle prefetches a file the user will never
-   * hear while the actual next track stays deselected.
+   * Tell the main process what is playing, which track is next, and where the
+   * play head is. The old code hardcoded fileIndex + 1, which under shuffle
+   * prefetches a file the user will never hear while the actual next track goes
+   * unprioritised.
+   *
+   * The position matters as much as the indices: main sizes its readahead
+   * window around it, so without it the window would sit at the start of the
+   * file and a seek would land outside everything already requested.
    */
   function syncPriority() {
     var p = pb();
     if (p.torrentId == null || p.fileIndex == null) return;
     var next = nextQueueIndex();
-    // Pin the cover: it's a few KB, and without this it gets deselected the
-    // moment playback starts and the artwork never arrives.
+    // Pin the cover: it's a few KB, and without this it competes with the audio
+    // for the whole session and the artwork never arrives.
     var cover = MP.artwork.coverIndex(MP.store.getTorrent(p.torrentId));
-    window.playerAPI.setPlaybackPriority(
-      p.torrentId,
-      p.fileIndex,
-      next != null ? next : p.fileIndex,
-      cover != null ? [cover] : []
-    );
+    var duration = active && isFinite(active.duration) ? active.duration : p.duration || 0;
+    window.playerAPI.setPlaybackState({
+      torrentId: p.torrentId,
+      fileIndex: p.fileIndex,
+      nextFileIndex: next != null ? next : p.fileIndex,
+      pinned: cover != null ? [cover] : [],
+      currentTime: active ? active.currentTime : 0,
+      duration: duration,
+    });
   }
 
   // -- playback ------------------------------------------------------------
@@ -432,6 +441,12 @@
         currentTime: media.currentTime,
         duration: isFinite(media.duration) ? media.duration : 0,
       });
+      // timeupdate fires ~4x/sec; main only re-evaluates its readahead window
+      // once a second, so anything faster is pure IPC churn.
+      if (media.currentTime - lastPositionSync >= 1 || media.currentTime < lastPositionSync) {
+        lastPositionSync = media.currentTime;
+        syncPriority();
+      }
     });
 
     media.addEventListener('progress', function () {

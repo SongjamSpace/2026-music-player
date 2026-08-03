@@ -1,3 +1,7 @@
 node_modules/
 *.log
 .DS_Store
+
+# build output — regenerate with `npm run build`
+dist/
+build/

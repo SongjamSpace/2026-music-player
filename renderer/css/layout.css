@@ -33,6 +33,21 @@
   -webkit-app-region: no-drag;
 }
 
+/* Floating overlays must opt out too, and it is not enough to paint on top.
+   The drag region is a set of rectangles handed to the OS window; macOS hit
+   tests it before the page ever sees the event, so anything overlapping the
+   titlebar's 52px strip is silently turned into a window drag no matter how
+   high its z-index. That is what killed every control in the DSP panel header,
+   which anchors upward from the transport and reaches y≈15 on a full-height
+   window. These are all <body> children, so a single list covers them. */
+
+.dsp,
+.menu,
+.toasts,
+dialog {
+  -webkit-app-region: no-drag;
+}
+
 .titlebar__spacer {
   flex: 1;
 }
@@ -133,7 +148,7 @@
 .fatal-error {
   position: fixed;
   inset: 0 0 auto 0;
-  z-index: 200;
+  z-index: var(--z-fatal);
   padding: var(--space-4) var(--space-6);
   background: var(--color-danger);
   color: var(--color-text-on-accent);

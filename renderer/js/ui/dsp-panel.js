@@ -14,6 +14,7 @@
   var moduleSwitches = {};
   var grMeter = null;
   var meterTimer = null;
+  var presetSig = null; // last rendered preset-label signature
 
   function s() {
     return MP.dsp.get();
@@ -293,6 +294,11 @@
     presetSelect.className = 'dsp__select';
     presetSelect.setAttribute('aria-label', 'Preset');
     presetSelect.addEventListener('change', function () {
+      // The status entries describe the current state; choosing one is a no-op.
+      if (presetSelect.value === CUSTOM || presetSelect.value === MODIFIED) {
+        refreshPresets();
+        return;
+      }
       MP.dsp.applyPreset(presetSelect.value);
       refreshAll();
     });
@@ -310,7 +316,7 @@
     ['A', 'B'].forEach(function (slot) {
       var b = el('button', null, slot);
       b.type = 'button';
-      b.setAttribute('aria-label', 'Snapshot ' + slot);
+      b.dataset.slot = slot;
       b.setAttribute('aria-pressed', MP.dsp.abSlot() === slot ? 'true' : 'false');
       b.addEventListener('click', function () {
         MP.dsp.abSwitch(slot);
@@ -320,9 +326,14 @@
     });
     var copy = el('button', null, '⇄');
     copy.type = 'button';
-    copy.setAttribute('aria-label', 'Copy current settings to the other snapshot');
-    copy.title = 'Copy to other snapshot';
-    copy.addEventListener('click', MP.dsp.abCopy);
+    copy.id = 'dsp-ab-copy';
+    copy.addEventListener('click', function () {
+      // Silent before: it only writes to the slot you *aren't* hearing, so with
+      // no confirmation there was nothing to tell it had happened.
+      var other = MP.dsp.abCopy();
+      refreshAll();
+      MP.toast.show('Copied ' + MP.dsp.abSlot() + ' to ' + other + '.');
+    });
     seg.appendChild(copy);
     head.appendChild(seg);
 
@@ -358,6 +369,7 @@
         }
         MP.dsp.savePreset(name);
         refreshPresets();
+        refreshAb();
         MP.toast.show('Saved preset “' + name + '”.');
       });
   }
@@ -614,16 +626,73 @@
 
   // -- refresh ---------------------------------------------------------------
 
+  /**
+   * The box names the parameters that are actually loaded, not the last button
+   * pressed. A recalled preset that has since been edited shows as "modified",
+   * and one whose name no longer means anything shows as Custom. Both are
+   * transient entries at the top with sentinel values, because a <select> can
+   * only display text that exists as an option — and picking the real name
+   * underneath them is then a natural "revert to the saved version".
+   */
+  // NUL-prefixed so they can't collide with anything a user names a preset.
+  var CUSTOM = '\u0000custom';
+  var MODIFIED = '\u0000modified';
+
   function refreshPresets() {
-    var current = s().lastPreset;
+    var st = s();
     presetSelect.textContent = '';
-    MP.dsp.presetNames().forEach(function (name) {
-      var opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name + (MP.dsp.isBuiltinPreset(name) ? '' : ' •');
-      if (name === current) opt.selected = true;
-      presetSelect.appendChild(opt);
+
+    var known = MP.dsp.hasPresetBasis();
+    var modified = MP.dsp.isPresetModified();
+    if (!known) {
+      presetSelect.appendChild(option(CUSTOM, 'Custom', true));
+    } else if (modified) {
+      presetSelect.appendChild(option(MODIFIED, st.lastPreset + ' — modified', true));
+    }
+
+    group('Built-in', Object.keys(D.BUILTIN_PRESETS));
+    group('Your presets', Object.keys(st.presets));
+
+    presetSig = st.lastPreset + '|' + known + '|' + modified;
+    presetSelect.title = known
+      ? st.lastPreset + (modified ? ' — edited since it was loaded' : '')
+      : 'Settings not saved as a preset';
+
+    function group(label, names) {
+      if (!names.length) return;
+      var og = document.createElement('optgroup');
+      og.label = label;
+      names.forEach(function (name) {
+        og.appendChild(option(name, name, known && !modified && name === st.lastPreset));
+      });
+      presetSelect.appendChild(og);
+    }
+  }
+
+  function option(value, label, selected) {
+    var opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    opt.selected = !!selected;
+    return opt;
+  }
+
+  /** Each slot says what it holds, so you can tell them apart before switching. */
+  function refreshAb() {
+    var active = MP.dsp.abSlot();
+    Array.prototype.forEach.call(panel.querySelectorAll('.dsp__seg [data-slot]'), function (b) {
+      var slot = b.dataset.slot;
+      var what = MP.dsp.abDescribe(slot);
+      b.setAttribute('aria-pressed', active === slot ? 'true' : 'false');
+      b.setAttribute('aria-label', 'Snapshot ' + slot + ': ' + what);
+      b.title = 'Snapshot ' + slot + ' · ' + what;
     });
+    var copy = document.getElementById('dsp-ab-copy');
+    if (copy) {
+      var other = active === 'A' ? 'B' : 'A';
+      copy.setAttribute('aria-label', 'Copy snapshot ' + active + ' to ' + other);
+      copy.title = 'Copy ' + active + ' to ' + other;
+    }
   }
 
   function syncModuleNotes() {
@@ -651,6 +720,12 @@
 
   function refreshAll() {
     var st = s();
+    // A preset or a reset can shrink the band list under the selection, which
+    // leaves the readout blank and the canvas keyboard nav pointing at nothing.
+    if (selectedBand >= st.eq.bands.length) {
+      selectedBand = st.eq.bands.length - 1;
+      if (MP.eqCanvas) MP.eqCanvas.select(selectedBand);
+    }
     setParam('preamp', st.preamp);
     ['threshold', 'ratio', 'attack', 'release', 'knee', 'makeup'].forEach(function (k) {
       setParam('comp.' + k, st.comp[k]);
@@ -667,11 +742,7 @@
     syncModuleNotes();
     var bypassBtn = document.getElementById('dsp-bypass');
     if (bypassBtn) bypassBtn.setAttribute('aria-pressed', st.enabled ? 'true' : 'false');
-    Array.prototype.forEach.call(panel.querySelectorAll('.dsp__seg button'), function (b) {
-      if (b.textContent === 'A' || b.textContent === 'B') {
-        b.setAttribute('aria-pressed', MP.dsp.abSlot() === b.textContent ? 'true' : 'false');
-      }
-    });
+    refreshAb();
     if (MP.eqCanvas) MP.eqCanvas.invalidate();
   }
 
@@ -723,6 +794,10 @@
     var left = MP.util.clamp(r.right - p.width, MARGIN, Math.max(MARGIN, window.innerWidth - p.width - MARGIN));
     panel.style.left = left + 'px';
     panel.style.top = Math.max(MARGIN, ceiling - p.height - GAP) + 'px';
+    // Toasts share this corner. Reserving here rather than in show() keeps the
+    // claim in lockstep with the panel by construction: anchor() is the only
+    // thing that positions it, and it already runs on open and on resize.
+    MP.toast.reserve('dsp', panel.getBoundingClientRect());
   }
 
   function show() {
@@ -742,6 +817,7 @@
     open = false;
     panel.hidden = true;
     btn.setAttribute('aria-expanded', 'false');
+    MP.toast.reserve('dsp', null);
     stopMeters();
     if (MP.eqCanvas) MP.eqCanvas.stop();
     MP.dsp.persistNow();
@@ -754,10 +830,12 @@
   }
 
   function updateAvailability() {
-    var ok = MP.dsp.isAvailable();
-    var probed = s().corsOk !== null;
     if (!banner) return;
-    if (ok || !probed) {
+    // `corsOk === false` is the only state that means "we tried and it failed".
+    // Keying off isAvailable() instead cried wolf on every launch: the probe
+    // can't run until something plays, so opening the panel first showed a red
+    // failure banner for a chain that was simply not started yet.
+    if (s().corsOk !== false) {
       banner.hidden = true;
     } else {
       banner.hidden = false;
@@ -811,7 +889,17 @@
     });
     MP.store.subscribe('dsp:state', function () {
       updateTriggerState();
-      if (open) syncBandInputs();
+      if (!open) return;
+      syncBandInputs();
+      // Rebuild the list only when the label would actually change. Doing it on
+      // every emit would mean rebuilding it 60 times a second mid-drag, which
+      // also closes the native popup if it happens to be open.
+      var sig = s().lastPreset + '|' + MP.dsp.hasPresetBasis() + '|' + MP.dsp.isPresetModified();
+      if (sig !== presetSig) {
+        presetSig = sig;
+        refreshPresets();
+        refreshAb();
+      }
     });
 
     updateTriggerState();

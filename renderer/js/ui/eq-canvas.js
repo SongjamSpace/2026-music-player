@@ -161,25 +161,55 @@
   // -- curve -----------------------------------------------------------------
 
   /**
+   * A private bank of biquads, never connected to anything, used only to
+   * measure the response.
+   *
+   * Reading the *playing* filters instead looks equivalent and isn't: their
+   * parameters are ramped, so a curve rebuilt the instant a preset or a reset
+   * lands samples the filters mid-glide and caches that stale shape until the
+   * next invalidation — which is why Reset all used to need a second click to
+   * redraw. These are assigned directly, so the curve always shows exactly the
+   * EQ the state describes. It also means the curve is correct before anything
+   * has played, when there is no AudioContext at all.
+   */
+  var mirrorCtx = null;
+  var mirrors = null;
+
+  function mirrorBank() {
+    // Prefer the real context so the response is computed at the true sample
+    // rate; an OfflineAudioContext is an inert stand-in with no device and no
+    // audio thread, and getFrequencyResponse needs no rendering to work.
+    var want = MP.dspGraph.context() || mirrorCtx || new OfflineAudioContext(1, 1, 48000);
+    if (mirrorCtx !== want || !mirrors) {
+      mirrorCtx = want;
+      mirrors = [];
+      for (var i = 0; i < D().MAX_BANDS; i++) mirrors.push(mirrorCtx.createBiquadFilter());
+    }
+    return mirrors;
+  }
+
+  /**
    * Cascaded biquads multiply in the frequency domain, so the composite
    * magnitude is the product across bands. Rebuilt only when something changes.
    */
   function rebuildCurve() {
     curveDirty = false;
-    var nodes = MP.dspGraph.isBuilt() ? MP.dspGraph.bandNodes() : null;
+    var nodes = mirrorBank();
+    var list = st().eq.on ? bands() : [];
     var n = total.length;
     var i, k;
     for (k = 0; k < n; k++) total[k] = 1;
 
-    if (nodes) {
-      var list = bands();
-      for (i = 0; i < list.length; i++) {
-        if (!list[i].on) continue;
-        var node = nodes[i];
-        if (!node) continue;
-        node.getFrequencyResponse(freqs, mag, phase);
-        for (k = 0; k < n; k++) total[k] *= mag[k];
-      }
+    for (i = 0; i < list.length && i < nodes.length; i++) {
+      var band = list[i];
+      if (!band.on) continue;
+      var node = nodes[i];
+      node.type = band.type;
+      node.frequency.value = band.f;
+      node.Q.value = band.q;
+      node.gain.value = D().GAINLESS_TYPES[band.type] ? 0 : band.g;
+      node.getFrequencyResponse(freqs, mag, phase);
+      for (k = 0; k < n; k++) total[k] *= mag[k];
     }
 
     var preamp = st().preamp || 0;

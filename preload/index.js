@@ -37,8 +37,20 @@ contextBridge.exposeInMainWorld('playerAPI', {
   setPref: (key, value) => ipcRenderer.invoke('set-pref', key, value),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 
-  setPlaybackPriority: (torrentId, currentFileIndex, nextFileIndex, pinned) =>
-    ipcRenderer.invoke('set-playback-priority', torrentId, currentFileIndex, nextFileIndex, pinned),
+  // Carries the play head as well as the track indices, so main can size the
+  // readahead window around where the listener actually is.
+  setPlaybackState: (state) => ipcRenderer.invoke('set-playback-state', state),
+  setActiveTorrent: (torrentId) => ipcRenderer.invoke('set-active-torrent', torrentId),
+
+  getDiagnostics: (torrentId) => ipcRenderer.invoke('get-diagnostics', torrentId),
+  retryPortMapping: () => ipcRenderer.invoke('retry-port-mapping'),
+
+  runNetPreflight: () => ipcRenderer.invoke('run-net-preflight'),
+  checkPublicIp: () => ipcRenderer.invoke('check-public-ip'),
+  clearPublicIp: () => ipcRenderer.invoke('clear-public-ip'),
+  probeSwarm: (torrentId) => ipcRenderer.invoke('probe-swarm', torrentId),
+  rememberHomeNetwork: () => ipcRenderer.invoke('remember-home-network'),
+  forgetHomeNetwork: () => ipcRenderer.invoke('forget-home-network'),
 
   openTorrentFolder: (torrentId) => ipcRenderer.invoke('open-torrent-folder', torrentId),
   openDownloadFolder: () => ipcRenderer.invoke('open-download-folder'),
@@ -47,5 +59,6 @@ contextBridge.exposeInMainWorld('playerAPI', {
   onTorrentProgress: subscribe('torrent-progress'),
   onRestoreMagnets: subscribe('restore-magnets'),
   onTorrentError: subscribe('torrent-error'),
+  onNatStatus: subscribe('nat-status'),
   onMenuCommand: subscribe('menu-command'),
 });

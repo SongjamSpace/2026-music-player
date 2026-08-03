@@ -62,24 +62,46 @@
   /**
    * Some things can't be automated (filter type, IR swap, reverb rewiring).
    * Duck the chain briefly so the coefficient jump doesn't tick.
+   *
+   * Reference counted against a *declared* resting level rather than a sampled
+   * one. Ducks arrive from independent async sources — a band type change, the
+   * 120ms reverb disconnect, an IR swap out of requestIdleCallback — so two can
+   * overlap. Sampling `gain.value` on entry meant the second one could read the
+   * first one's ramp mid-flight, capture ~0 as "the level to restore", and put
+   * the chain back to silence permanently: every later control writes filter
+   * params, not chainGain, so nothing would ever recover it.
+   *
+   * `finally` matters for the same reason — a throwing callback must not strand
+   * the chain at zero.
    */
+  var chainLevel = 1; // where chainGain belongs when nothing is ducking
+  var duckDepth = 0;
+
   function duck(fn) {
     if (!ctx || ctx.state !== 'running') {
       fn();
       return;
     }
     var g = n.chainGain.gain;
-    var t = ctx.currentTime;
-    var level = g.value;
-    g.cancelScheduledValues(t);
-    g.setValueAtTime(level, t);
-    g.linearRampToValueAtTime(0, t + 0.008);
+    if (duckDepth === 0) {
+      var t = ctx.currentTime;
+      g.cancelScheduledValues(t);
+      g.setValueAtTime(g.value, t);
+      g.linearRampToValueAtTime(0, t + 0.008);
+    }
+    duckDepth++;
     setTimeout(function () {
-      fn();
-      var t2 = ctx.currentTime;
-      g.cancelScheduledValues(t2);
-      g.setValueAtTime(0, t2);
-      g.linearRampToValueAtTime(level, t2 + 0.012);
+      try {
+        fn();
+      } finally {
+        duckDepth = Math.max(0, duckDepth - 1);
+        if (duckDepth === 0) {
+          var t2 = ctx.currentTime;
+          g.cancelScheduledValues(t2);
+          g.setValueAtTime(0, t2);
+          g.linearRampToValueAtTime(chainLevel, t2 + 0.012);
+        }
+      }
     }, 10);
   }
 
@@ -416,8 +438,11 @@
   /** Crossfade, never a disconnect — the audio path must never be torn down. */
   function setBypass(on) {
     if (!built) return;
-    ramp(n.chainGain.gain, on ? 0 : 1, 0.03);
+    chainLevel = on ? 0 : 1;
     ramp(n.bypassGain.gain, on ? 1 : 0, 0.03);
+    // Mid-duck the chain is deliberately at zero; the duck's restore lands on
+    // the level we just declared, so writing it here would only fight it.
+    if (duckDepth === 0) ramp(n.chainGain.gain, chainLevel, 0.03);
   }
 
   function setOutputGain(value) {

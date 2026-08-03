@@ -1,31 +1,108 @@
 (function () {
   'use strict';
 
-  var VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.ogv'];
-  var VIDEO_TYPES = [
-    'video/mp4',
-    'video/webm',
-    'video/x-matroska',
-    'video/quicktime',
-    'video/x-msvideo',
+  /**
+   * Torrent payloads are classified purely by extension.
+   *
+   * WebTorrent does not populate `file.type` — every file arrives as
+   * `application/octet-stream`, including .flac and .jpg — so any MIME-based
+   * test is dead code. The extension is the only signal available.
+   */
+
+  // Every extension that IS media, whether or not this build can decode it.
+  // Anything media stays visible (labelled "Unsupported" if undecodable);
+  // anything not on these lists is a sidecar and gets hidden.
+  var AUDIO_EXTENSIONS = [
+    '.mp3', '.m4a', '.m4b', '.aac', '.flac', '.wav', '.wave', '.ogg', '.oga',
+    '.opus', '.weba', '.aif', '.aiff', '.aifc', '.wma', '.ape', '.alac',
+    '.dsf', '.dff', '.mpc', '.wv', '.tta', '.shn', '.ac3', '.dts', '.amr', '.au',
   ];
 
-  // Containers/codecs Chromium can actually decode. Everything else gets dimmed
-  // and labelled rather than left to fail with MEDIA_ERR_SRC_NOT_SUPPORTED after
-  // the user has already clicked it.
-  var AUDIO_EXTENSIONS = ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.oga', '.opus', '.weba'];
+  var VIDEO_EXTENSIONS = [
+    '.mp4', '.m4v', '.webm', '.mkv', '.mov', '.avi', '.ogv', '.wmv', '.flv',
+    '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts',
+  ];
+
+  var IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp'];
+
+  // Extension → the MIME string to hand to canPlayType(). Only formats Chromium
+  // has any chance with are listed; a media extension missing from here is
+  // simply reported as undecodable.
+  var PROBE_MIME = {
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.m4b': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.flac': 'audio/flac',
+    '.wav': 'audio/wav',
+    '.wave': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.oga': 'audio/ogg',
+    '.opus': 'audio/ogg; codecs=opus',
+    '.weba': 'audio/webm',
+    '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
+    '.webm': 'video/webm',
+    '.ogv': 'video/ogg',
+  };
 
   function formatBytes(bytes) {
     if (!bytes) return '0 B';
     var k = 1024;
     var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    var i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
+    // Clamp low as well as high: a value between 0 and 1 — which a trickling
+    // download speed really does produce — gives a negative exponent, and
+    // sizes[-1] renders as "819.2 undefined".
+    var i = Math.max(0, Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k))));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   }
 
   function formatSpeed(bytesPerSec) {
     if (!bytesPerSec || bytesPerSec < 0) return '—';
     return formatBytes(bytesPerSec) + '/s';
+  }
+
+  /**
+   * Judge the observed traffic path against what the user said to expect.
+   *
+   * Pure and lives here rather than inside the settings dialog so the whole
+   * table can be exercised without arranging the world to match — half these
+   * states need a VPN to drop, which is not something a check should require.
+   *
+   * `vpnPreferred` is the split-tunnel mode and reads oddly on purpose: a VPN
+   * that is up while torrents go direct is the goal, not a problem. The failure
+   * it watches for is torrents being pulled back into the tunnel, because that
+   * is when inbound peers disappear.
+   *
+   * @param {string} expected  'auto' | 'direct' | 'vpn' | 'vpn-preferred'
+   * @param {boolean} tunnel   traffic is currently egressing a tunnel
+   * @param {boolean} vpnUp    a tunnel interface exists, used or not
+   */
+  function pathVerdict(expected, tunnel, vpnUp) {
+    if (expected === 'vpn-preferred') {
+      if (tunnel) {
+        return {
+          cls: 'is-warn',
+          desc: 'Torrents are going through the VPN, so no peer can connect in. Your split tunnel is not live.',
+        };
+      }
+      return vpnUp
+        ? { cls: 'is-good', desc: 'Split tunnel working — the VPN is up for other traffic while torrents go direct.' }
+        : { cls: 'is-good', desc: 'VPN is down. Downloads continue directly; other traffic is no longer tunnelled.' };
+    }
+    if (expected === 'direct' && tunnel) {
+      return {
+        cls: 'is-bad',
+        desc: 'You expect a direct path, but macOS is routing everything through the tunnel. This app cannot override that — see "Split tunnelling" in the README.',
+      };
+    }
+    if (expected === 'vpn' && !tunnel) {
+      return {
+        cls: 'is-bad',
+        desc: 'You expect the VPN, but traffic is going out in the clear. The tunnel may have dropped.',
+      };
+    }
+    return { cls: 'is-good', desc: null };
   }
 
   /** Seconds → m:ss / h:mm:ss. Returns '—:—' for unknown/Infinity. */
@@ -88,33 +165,71 @@
     }
   }
 
-  function isVideoFile(file) {
+  function extOf(file) {
     var name = ((file && file.name) || '').toLowerCase();
-    var type = ((file && file.type) || '').toLowerCase();
-    return (
-      VIDEO_EXTENSIONS.some(function (ext) { return name.endsWith(ext); }) ||
-      VIDEO_TYPES.some(function (t) { return type.indexOf(t) !== -1; })
-    );
+    var dot = name.lastIndexOf('.');
+    return dot === -1 ? '' : name.slice(dot);
   }
 
-  var IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp'];
+  function hasExt(file, list) {
+    return list.indexOf(extOf(file)) !== -1;
+  }
+
+  function isVideoFile(file) {
+    return hasExt(file, VIDEO_EXTENSIONS);
+  }
+
+  function isAudioFile(file) {
+    return hasExt(file, AUDIO_EXTENSIONS);
+  }
+
+  /** Audio or video, regardless of whether we can decode it. */
+  function isMediaFile(file) {
+    return isAudioFile(file) || isVideoFile(file);
+  }
+
+  // canPlayType needs a media element; one is enough, and the answers are
+  // per-format constants, so cache them.
+  var probeEl = null;
+  var decodeCache = {};
+
+  /** Asks the engine rather than trusting a hand-maintained whitelist. */
+  function canDecode(file) {
+    var ext = extOf(file);
+    if (decodeCache[ext] != null) return decodeCache[ext];
+    var mime = PROBE_MIME[ext];
+    if (!mime) {
+      decodeCache[ext] = false;
+      return false;
+    }
+    if (!probeEl) probeEl = document.createElement('video');
+    decodeCache[ext] = probeEl.canPlayType(mime) !== '';
+    return decodeCache[ext];
+  }
+
+  /**
+   * 'audio' | 'video' | 'image' | 'other'.
+   * 'other' is the cue sheets, rip logs, .accurip/.toc/.m3u checksums and
+   * readmes that ship with most CD rips — noise in a track list.
+   */
+  function fileKind(file) {
+    if (isAudioFile(file)) return 'audio';
+    if (isVideoFile(file)) return 'video';
+    if (isImageFile(file)) return 'image';
+    return 'other';
+  }
 
   function isImageFile(file) {
-    var name = ((file && file.name) || '').toLowerCase();
-    var type = ((file && file.type) || '').toLowerCase();
-    return (
-      IMAGE_EXTENSIONS.some(function (ext) { return name.endsWith(ext); }) ||
-      type.indexOf('image/') === 0
-    );
+    return hasExt(file, IMAGE_EXTENSIONS);
   }
 
   function isPlayableAudio(file) {
-    var name = ((file && file.name) || '').toLowerCase();
-    return AUDIO_EXTENSIONS.some(function (ext) { return name.endsWith(ext); });
+    return isAudioFile(file) && canDecode(file);
   }
 
+  /** Media this build can actually decode — safe to put in a play queue. */
   function isPlayable(file) {
-    return isPlayableAudio(file) || isVideoFile(file);
+    return (isAudioFile(file) || isVideoFile(file)) && canDecode(file);
   }
 
   /** Stable 0-359 hue from an infohash, so a torrent's artwork tile never changes. */
@@ -158,15 +273,21 @@
   window.MP.util = {
     formatBytes: formatBytes,
     formatSpeed: formatSpeed,
+    pathVerdict: pathVerdict,
     formatDuration: formatDuration,
     formatETA: formatETA,
     extractMagnet: extractMagnet,
     parseInfoHash: parseInfoHash,
     parseDisplayName: parseDisplayName,
     isVideoFile: isVideoFile,
+    isAudioFile: isAudioFile,
     isImageFile: isImageFile,
+    isMediaFile: isMediaFile,
     isPlayableAudio: isPlayableAudio,
     isPlayable: isPlayable,
+    canDecode: canDecode,
+    fileKind: fileKind,
+    extOf: extOf,
     hueFromId: hueFromId,
     tpl: tpl,
     el: el,

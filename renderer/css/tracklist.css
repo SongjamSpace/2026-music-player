@@ -96,6 +96,82 @@
   margin-top: var(--space-2);
 }
 
+/* connection panel — collapsed by default so the header stays uncluttered */
+.net-panel {
+  margin-top: var(--space-3);
+}
+
+.net-panel__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.net-panel__toggle::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.net-panel__toggle[aria-expanded='true']::before {
+  transform: rotate(90deg);
+}
+
+.net-panel__toggle:hover {
+  color: var(--color-text-secondary);
+}
+
+.net-panel__body {
+  margin-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  user-select: text;
+}
+
+.net-panel__verdict {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+.net-panel__verdict.is-good {
+  color: var(--color-success);
+}
+.net-panel__verdict.is-warn {
+  color: var(--color-warning);
+}
+.net-panel__verdict.is-bad {
+  color: var(--color-danger);
+}
+
+.net-panel__row {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.net-panel__row.is-good {
+  color: var(--color-success);
+}
+.net-panel__row.is-warn {
+  color: var(--color-warning);
+}
+.net-panel__row.is-bad {
+  color: var(--color-danger);
+}
+
+.net-panel__action {
+  align-self: flex-start;
+  margin-top: var(--space-2);
+}
+
 .torrent-header__meter {
   grid-column: 1 / -1;
   height: 3px;
@@ -285,4 +361,16 @@
 .track-row__state svg {
   width: 15px;
   height: 15px;
+}
+
+/* Footnote for non-media files kept out of the list. */
+.tracklist__note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-separator);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
 }

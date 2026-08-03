@@ -1,5 +1,7 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
+const net = require('net');
+const dgram = require('dgram');
 const path = require('path');
 const Store = require('electron-store');
 const mm = require('music-metadata');
@@ -9,9 +11,26 @@ const {
   infoHashFromMagnet,
   AUDIO_RE,
 } = require('./torrent-service');
+const { createTrackers } = require('./trackers');
+const { createPiecePolicy } = require('./piece-policy');
+const nat = require('./nat');
+const netPath = require('./net-path');
+const swarmProbe = require('./swarm-probe');
+
+// Pin the data directory before anything reads it.
+//
+// Electron derives userData from the app name, which changes the moment a
+// packaged build sets a productName — silently orphaning the library, prefs and
+// cached .torrent files created while running from source. Naming it explicitly
+// keeps `npm start` and the built .app pointing at the same folder.
+app.setPath('userData', path.join(app.getPath('appData'), '2026-music-player'));
 
 const store = new Store();
 const torrentService = new TorrentService();
+const piecePolicy = createPiecePolicy({
+  service: torrentService,
+  getPrefs: () => getPrefs(),
+});
 
 const DEFAULT_PREFS = {
   theme: 'midnight',
@@ -24,12 +43,102 @@ const DEFAULT_PREFS = {
   readDurations: false,
   durations: {},
   dsp: {},
+  // Null until first launch picks one — see resolveTorrentPort().
+  torrentPort: null,
+  uploadLimit: 1500000,
+  // 'auto' follows the play-head buffer; the other two pin it for A/B testing.
+  pieceStrategy: 'auto',
+  showNetPanel: false,
+
+  // An expectation the app checks reality against — NOT a control. The app
+  // cannot choose an interface; see the routing note at the top of net-path.js.
+  // null means "adopt whatever is detected", resolved once on first launch.
+  expectedPath: null, // 'auto' | 'direct' | 'vpn' | 'vpn-preferred'
+  homeNetwork: null, // fingerprint from netPath.fingerprint()
+  peerEncryption: true, // restart-required in both directions
 };
 
 let mainWindow = null;
+// Set when the preferred listen port was taken and we fell back to ephemeral,
+// so the UI can explain why incoming connections are off.
+let portFallback = null;
 
 function getPrefs() {
   return Object.assign({}, DEFAULT_PREFS, store.get('prefs', {}));
+}
+
+function setPref(key, value) {
+  const prefs = getPrefs();
+  prefs[key] = value;
+  store.set('prefs', prefs);
+  return prefs;
+}
+
+/**
+ * A fixed listen port, chosen once per install and then kept.
+ *
+ * Not ephemeral: a random port can't be port-forwarded, and every peer that
+ * learned our address through DHT or PEX is unable to reconnect after a
+ * restart. Not 51413 either — that's Transmission's well-known port and the
+ * first thing a traffic shaper looks for. Random-per-install in the dynamic
+ * range gives a stable address without a recognisable fingerprint.
+ */
+function preferredTorrentPort() {
+  const saved = getPrefs().torrentPort;
+  if (Number.isInteger(saved) && saved > 1024 && saved < 65534) return saved;
+  const port = 49160 + Math.floor(Math.random() * 15000);
+  setPref('torrentPort', port);
+  return port;
+}
+
+function canBindTcp(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.listen(port, () => server.close(() => resolve(true)));
+  });
+}
+
+function canBindUdp(port) {
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket('udp4');
+    socket.once('error', () => {
+      try {
+        socket.close();
+      } catch (_) {
+        /* already gone */
+      }
+      resolve(false);
+    });
+    socket.bind(port, () => socket.close(() => resolve(true)));
+  });
+}
+
+/**
+ * Check the port is actually free before handing it to WebTorrent.
+ *
+ * This matters more than it looks: WebTorrent treats a failed listen as a fatal
+ * client error and destroys itself, so a single EADDRINUSE takes down every
+ * torrent with a "client is destroyed" for anything you try afterwards. A
+ * second copy of the app — or anything else on that port — would otherwise
+ * leave the player silently unable to download at all.
+ *
+ * Falling back to an ephemeral port loses inbound connectivity for the session,
+ * which is a real cost, but it is not remotely the same cost as no downloads.
+ */
+async function resolveTorrentPort() {
+  const preferred = preferredTorrentPort();
+  const free =
+    (await canBindTcp(preferred)) &&
+    (await canBindUdp(preferred)) &&
+    (await canBindUdp(preferred + 1));
+  if (free) return { port: preferred, preferred, fellBack: false };
+
+  console.warn(
+    '[torrent] port ' + preferred + ' is in use (another copy of the app?) — ' +
+    'falling back to a random port for this session; incoming connections will not work'
+  );
+  return { port: 0, preferred, fellBack: true };
 }
 
 /**
@@ -102,10 +211,24 @@ function createWindow() {
       const where = sourceId ? ` (${path.basename(sourceId)}:${line})` : '';
       console.log(`[renderer:${levels[level] || level}] ${message}${where}`);
     });
-    mainWindow.webContents.on('render-process-gone', (e, details) => {
-      console.error('[renderer] gone:', details.reason);
-    });
   }
+
+  // Always on, packaged included. A dead renderer is a blank window with the
+  // audio cut off and no clue why — indistinguishable from "the app crashed".
+  // Reloading gets playback controls back; the reason lands in the log either
+  // way. `clean-exit` is the normal teardown on quit, so it isn't a failure.
+  mainWindow.webContents.on('render-process-gone', (e, details) => {
+    console.error('[renderer] gone:', details.reason, 'exitCode:', details.exitCode);
+    if (details.reason === 'clean-exit' || mainWindow.isDestroyed()) return;
+    mainWindow.reload();
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+    console.error('[renderer] unresponsive — main thread blocked');
+  });
+  mainWindow.webContents.on('responsive', () => {
+    console.error('[renderer] responsive again');
+  });
 }
 
 function buildMenu() {
@@ -177,10 +300,69 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+/**
+ * First-run resolution of `expectedPath`, plus the initial probe.
+ *
+ * The expectation is adopted from what is actually detected, and it is done
+ * here in main rather than in the renderer so that a launch on a broken network
+ * can't bake in a wrong expectation from a stale UI read. Written through
+ * setPref so it survives, and only ever set once.
+ */
+async function initNetPath() {
+  if (getPrefs().expectedPath == null) {
+    const egress = await netPath.detectEgress();
+    const adopted = egress && egress.tunnel ? 'vpn-preferred' : 'direct';
+    setPref('expectedPath', adopted);
+    netPath.setExpected(adopted);
+    console.log('[net-path] first run — expecting ' + adopted);
+  }
+  await netPath.refreshFingerprint();
+  await netPath.preflight();
+}
+
+// userData is already pinned at the top of this file, so it is safe to read
+// before 'ready'.
+const trackers = createTrackers({
+  cacheDir: app.getPath('userData'),
+  log: (msg) => console.log(msg),
+});
+
 app.whenReady().then(async () => {
   installStreamCorsHeaders();
   torrentService.setCacheDir(path.join(app.getPath('userData'), 'torrents'));
-  await torrentService.start();
+
+  const listen = await resolveTorrentPort();
+  portFallback = listen.fellBack ? listen.preferred : null;
+  await torrentService.start({
+    torrentPort: listen.port,
+    uploadLimit: getPrefs().uploadLimit,
+    secure: getPrefs().peerEncryption !== false,
+    trackers,
+  });
+
+  netPath.setExpected(getPrefs().expectedPath);
+  netPath.setHome(getPrefs().homeNetwork);
+  // Fire and forget, same reasoning as nat.open(): nothing about showing a
+  // window should wait on a network probe.
+  initNetPath().catch((err) => console.error('[net-path] startup:', err.message));
+
+  // Fire and forget: torrents added before this lands still get the cached or
+  // builtin list, and the refreshed one persists for next launch.
+  trackers.refresh();
+
+  // Also fire and forget. A silent gateway takes seconds to time out, and there
+  // is nothing about opening a window that should wait on the router.
+  // Pointless on an ephemeral port: it changes every launch, so the mapping
+  // would be stale before anyone could use it. nat.open() additionally skips
+  // the router entirely when traffic egresses a tunnel.
+  if (listen.port) {
+    nat
+      .open({ torrentPort: listen.port, dhtPort: listen.port + 1 })
+      .then((s) => send('nat-status', s))
+      .catch((err) => console.error('[nat] unexpected:', err.message));
+  }
+
+  piecePolicy.start();
 
   const savedPath = store.get('downloadPath');
   if (savedPath) {
@@ -198,8 +380,46 @@ app.whenReady().then(async () => {
   }
 });
 
+// -- shutdown --------------------------------------------------------------
+//
+// Releasing the router mappings is asynchronous, so teardown can't happen
+// inline in 'window-all-closed' the way it used to. Leaked mappings aren't
+// catastrophic — they expire with their TTL — but they accumulate in the
+// router's table across restarts, and small routers do run out.
+
+const SHUTDOWN_TIMEOUT_MS = 3000;
+let shuttingDown = false;
+
+async function shutdown() {
+  piecePolicy.stop();
+  // A router that stops answering mid-unmap must never be able to wedge quit.
+  await Promise.race([
+    nat.close().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+  ]);
+  try {
+    torrentService.destroy();
+  } catch (err) {
+    console.warn('[shutdown] torrent teardown:', err.message);
+  }
+}
+
+app.on('before-quit', (event) => {
+  if (shuttingDown) return; // second pass — let Electron finish the quit
+  shuttingDown = true;
+  event.preventDefault();
+  console.log('[shutdown] releasing port mappings…');
+  // Never leave this un-caught: if teardown rejects, the app hangs with no
+  // window and no way to quit but Force Quit.
+  shutdown()
+    .catch((err) => console.warn('[shutdown] failed:', err.message))
+    .then(() => {
+      console.log('[shutdown] done');
+      app.quit();
+    });
+});
+
 app.on('window-all-closed', () => {
-  torrentService.destroy();
   app.quit();
 });
 
@@ -375,16 +595,137 @@ ipcMain.handle('choose-download-path', async () => {
 ipcMain.handle('get-prefs', () => getPrefs());
 
 ipcMain.handle('set-pref', (event, key, value) => {
-  const prefs = getPrefs();
-  prefs[key] = value;
-  store.set('prefs', prefs);
+  const prefs = setPref(key, value);
+  // The upload cap is a live knob — webtorrent rebuilds the throttle group on
+  // the fly, so there's no reason to make the user restart for it. The listen
+  // port is not: changing it means rebinding sockets and remapping the router.
+  if (key === 'uploadLimit') torrentService.setUploadLimit(value);
+  // Pure display state — the app cannot act on an expectation, only check it.
+  if (key === 'expectedPath') netPath.setExpected(value);
+  // peerEncryption is deliberately absent: enableSecure() is one-way, so it
+  // cannot be applied live in either direction. The Settings row says so.
   return prefs;
 });
 
 ipcMain.handle('get-app-version', () => app.getVersion());
 
-ipcMain.handle('set-playback-priority', (event, torrentId, currentFileIndex, nextFileIndex, pinned) => {
-  torrentService.setFilePriorities(torrentId, currentFileIndex, nextFileIndex, pinned);
+// -- playback priority -----------------------------------------------------
+//
+// The renderer fires this on play, next, seek, seekTo, shuffle and repeat, so a
+// scrub drag produces a burst of them. Each one costs a full re-sort of the
+// selection list plus an interest recalculation that loops every piece against
+// every wire — on the same thread as the torrent engine. Collapse identical
+// requests outright and trail the rest.
+
+const PRIORITY_DEBOUNCE_MS = 250;
+const priorityTimers = new Map();
+const priorityLast = new Map();
+
+function schedulePriority(torrentId, current, next, pinned) {
+  const signature = JSON.stringify([current, next, pinned || []]);
+  if (priorityLast.get(torrentId) === signature) return;
+  priorityLast.set(torrentId, signature);
+
+  clearTimeout(priorityTimers.get(torrentId));
+  priorityTimers.set(
+    torrentId,
+    setTimeout(() => {
+      priorityTimers.delete(torrentId);
+      torrentService.setPlaybackPriorities(torrentId, current, next, pinned);
+    }, PRIORITY_DEBOUNCE_MS)
+  );
+}
+
+/**
+ * Carries the play head as well as the track indices. The position is what lets
+ * the readahead window follow the listener instead of sitting at the start of
+ * the file; it arrives at ~1 Hz off the media element's timeupdate.
+ */
+ipcMain.handle('set-playback-state', (event, state) => {
+  if (!state || state.torrentId == null) {
+    piecePolicy.setPlaybackState(null);
+    return;
+  }
+  schedulePriority(state.torrentId, state.fileIndex, state.nextFileIndex, state.pinned);
+  piecePolicy.setPlaybackState({
+    torrentId: state.torrentId,
+    fileIndex: state.fileIndex,
+    nextFileIndex: state.nextFileIndex,
+    currentTime: Number(state.currentTime) || 0,
+    duration: Number(state.duration) || 0,
+  });
+});
+
+/**
+ * On demand only — this opens real TCP connections to real peers, so it runs
+ * when the user asks and never on a timer.
+ */
+ipcMain.handle('probe-swarm', async (event, torrentId) => {
+  const info = torrentService.getSwarmProbeInput(torrentId);
+  if (!info) return { error: 'That torrent is not loaded.' };
+  try {
+    return await swarmProbe.probe(info.infoHash, {
+      trackers: info.trackers,
+      knownPeers: info.knownPeers,
+    });
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+ipcMain.handle('set-active-torrent', (event, torrentId) => {
+  torrentService.setActiveTorrent(torrentId);
+});
+
+ipcMain.handle('get-diagnostics', (event, torrentId) => {
+  const diag = torrentService.getDiagnostics(torrentId);
+  if (diag) {
+    diag.nat = nat.status();
+    diag.policy = piecePolicy.status();
+    diag.netPath = netPath.status();
+    diag.portFallback = portFallback;
+    diag.inboundPeak = diag.inboundPeak || 0;
+  }
+  return diag;
+});
+
+ipcMain.handle('retry-port-mapping', async () => {
+  const status = await nat.retry();
+  send('nat-status', status);
+  return status;
+});
+
+// -- network path ----------------------------------------------------------
+//
+// These are the only entry points that run probes or subprocesses. The 2s
+// diagnostics poll reads netPath.status(), which is cached and synchronous.
+
+ipcMain.handle('run-net-preflight', async () => {
+  await netPath.refreshFingerprint();
+  return netPath.preflight({ force: true });
+});
+
+ipcMain.handle('check-public-ip', () => netPath.publicIp());
+
+ipcMain.handle('clear-public-ip', () => {
+  netPath.clearPublicIp();
+});
+
+ipcMain.handle('remember-home-network', async () => {
+  const fp = await netPath.fingerprint();
+  if (!fp) {
+    return { error: "Couldn't identify this network — no gateway hardware address in the ARP table." };
+  }
+  setPref('homeNetwork', fp);
+  netPath.setHome(fp);
+  await netPath.refreshFingerprint();
+  return { home: fp };
+});
+
+ipcMain.handle('forget-home-network', () => {
+  setPref('homeNetwork', null);
+  netPath.setHome(null);
+  return { home: null };
 });
 
 ipcMain.handle('open-torrent-folder', async (event, torrentId) => {

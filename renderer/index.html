@@ -155,7 +155,11 @@
 
   <audio id="audio-player" preload="metadata"></audio>
 
-  <div class="toasts" id="toasts"></div>
+  <!-- popover=manual promotes this into the browser's top layer, which is the
+       only place nothing else can paint over: modal dialogs live there too, so
+       no z-index could ever have won this. Shown once at init and never
+       dismissed; see toast.js. -->
+  <div class="toasts" id="toasts" popover="manual"></div>
   <div class="menu" id="context-menu" role="menu" hidden></div>
 
   <!-- Body-level on purpose: .transport has backdrop-filter, which would make it
@@ -215,6 +219,140 @@
         <div class="setting-row">
           <button type="button" class="btn btn--secondary" id="btn-change-path">Change…</button>
           <button type="button" class="btn btn--ghost" id="btn-reveal-path">Reveal in Finder</button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <span class="settings-group__label">Network</span>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Incoming connections</div>
+            <div class="setting-row__value" id="net-mapping">Checking…</div>
+            <div class="setting-row__desc" id="net-mapping-desc">
+              Peers can only connect to you if your router forwards this app's port. Without it,
+              downloads are slower — especially on smaller swarms.
+            </div>
+          </div>
+          <button type="button" class="btn btn--secondary" id="btn-retry-mapping">Retry</button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Traffic path</div>
+            <div class="setting-row__value" id="net-path-actual">Checking…</div>
+            <div class="setting-row__desc" id="net-path-actual-desc">
+              Where macOS is currently sending this app's traffic. This app cannot pick an
+              interface — the system routing table decides that, for torrents and everything else
+              alike.
+            </div>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Expect traffic to leave via</div>
+            <div class="setting-row__desc">
+              A check, not a switch. Changing this moves no traffic; it only tells the app which
+              situation to warn you about.
+            </div>
+          </div>
+          <select id="select-expected-path" class="select">
+            <option value="auto">Auto — don't judge</option>
+            <option value="direct">Direct, no tunnel</option>
+            <option value="vpn">Through VPN</option>
+            <option value="vpn-preferred">VPN preferred</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Interface reachability</div>
+            <div class="setting-row__value" id="net-preflight">Not tested</div>
+            <div class="setting-row__desc">
+              Opens one connection to 1.1.1.1 from each interface's own address. “No route” means
+              macOS will not send anything out of that interface right now, whatever you configure
+              here.
+            </div>
+          </div>
+          <button type="button" class="btn btn--secondary" id="btn-net-preflight">Test</button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Home network</div>
+            <div class="setting-row__value" id="net-home">Not recognised</div>
+            <div class="setting-row__desc">
+              Identified by the router's hardware address. Used only to warn you when torrent
+              traffic is going out directly on a network you haven't marked as yours.
+            </div>
+          </div>
+          <button type="button" class="btn btn--secondary" id="btn-home-network">Remember this network</button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Public IP address</div>
+            <div class="setting-row__value" id="net-public-ip">—</div>
+            <div class="setting-row__desc">
+              Never checked automatically. Pressing Check contacts an outside server (1.1.1.1),
+              which necessarily learns your address.
+            </div>
+          </div>
+          <button type="button" class="btn btn--secondary" id="btn-public-ip">Check</button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Listen port</div>
+            <div class="setting-row__value" id="net-port">—</div>
+            <div class="setting-row__desc">
+              The port your VPN provider forwards to you. Peers can only <em>start</em> a
+              connection to you on this port — without it you can reach only those peers who
+              happen to have an open port themselves, which on a small swarm is often none of
+              them. Takes effect after a restart.
+            </div>
+            <div class="setting-row__desc" id="net-external">—</div>
+          </div>
+          <input type="number" id="input-listen-port" class="input-compact tnum"
+                 min="1024" max="65535" step="1" inputmode="numeric" aria-label="Listen port">
+          <button type="button" class="btn btn--secondary" id="btn-apply-port">Apply</button>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Upload limit</div>
+            <div class="setting-row__desc">
+              Capping upload usually makes downloads <em>faster</em>: a saturated uplink delays the
+              acknowledgements your downloads depend on. Don't set this too low — peers share back
+              with peers who share with them.
+            </div>
+          </div>
+          <select id="select-upload-limit" class="select">
+            <option value="524288">512 KB/s</option>
+            <option value="1500000">1.5 MB/s</option>
+            <option value="5242880">5 MB/s</option>
+            <option value="-1">Unlimited</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Piece strategy</div>
+            <div class="setting-row__desc">
+              Auto downloads in order while your buffer is thin, then switches to rarest-first,
+              which earns you more peers. Only change this to compare the two.
+            </div>
+          </div>
+          <select id="select-piece-strategy" class="select">
+            <option value="auto">Auto</option>
+            <option value="sequential">Sequential</option>
+            <option value="rarest">Rarest first</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div class="setting-row__text">
+            <div class="setting-row__title">Encrypt peer connections</div>
+            <div class="setting-row__value" id="net-encryption">—</div>
+            <div class="setting-row__desc">
+              Obfuscates the BitTorrent protocol so an ISP has a harder time recognising and
+              throttling it. This is not privacy — every peer still sees your address. Only TCP
+              peers can use it; uTP peers stay in the clear. Takes effect after a restart, in both
+              directions.
+            </div>
+          </div>
+          <button type="button" class="switch" id="switch-encryption"></button>
         </div>
       </div>
 
@@ -329,6 +467,7 @@
   <script src="js/ui/empty.js"></script>
   <script src="js/ui/dialogs.js"></script>
   <script src="js/ui/sidebar.js"></script>
+  <script src="js/ui/net-panel.js"></script>
   <script src="js/ui/torrent-header.js"></script>
   <script src="js/ui/tracklist.js"></script>
   <script src="js/ui/transport.js"></script>

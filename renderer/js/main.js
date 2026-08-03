@@ -74,6 +74,13 @@
   function seedSettings(prefs) {
     MP.store.state.settings.prefetch = prefs.prefetch !== false;
     MP.store.state.settings.readDurations = !!prefs.readDurations;
+    MP.store.state.settings.uploadLimit = prefs.uploadLimit != null ? prefs.uploadLimit : 1500000;
+    MP.store.state.settings.pieceStrategy = prefs.pieceStrategy || 'auto';
+    MP.store.state.settings.showNetPanel = !!prefs.showNetPanel;
+    MP.store.state.settings.expectedPath = prefs.expectedPath || 'auto';
+    MP.store.state.settings.homeNetwork = prefs.homeNetwork || null;
+    MP.store.state.settings.peerEncryption = prefs.peerEncryption !== false;
+    MP.store.state.settings.torrentPort = prefs.torrentPort || null;
     if (prefs.durations) {
       Object.keys(prefs.durations).forEach(function (key) {
         MP.store.state.durations.set(key, prefs.durations[key]);

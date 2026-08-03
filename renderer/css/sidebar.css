@@ -145,7 +145,7 @@
 
 .menu {
   position: fixed;
-  z-index: 120;
+  z-index: var(--z-menu);
   min-width: 200px;
   padding: var(--space-2);
   border-radius: var(--radius-md);

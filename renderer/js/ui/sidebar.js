@@ -27,7 +27,7 @@
 
     function statusText(t) {
       if (t.pending) return 'Fetching metadata…';
-      var count = t.files ? t.files.length : 0;
+      var count = t.mediaCount != null ? t.mediaCount : t.files ? t.files.length : 0;
       var tracks = count === 1 ? '1 track' : count + ' tracks';
       if (t.done) {
         return tracks + ' · Done' + (t.length ? ' · ' + MP.util.formatBytes(t.length) : '');
@@ -46,9 +46,10 @@
         el.classList.toggle('is-pending', !!t.pending);
       },
       updateProgress: function (t) {
-        // Early-out on the rounded values: most rows are frozen most of the
-        // time because setFilePriorities deselects everything but the current
-        // and next file, so this skips nearly every DOM write.
+        // Early-out on the rounded values. This used to be an optimisation for
+        // mostly-frozen rows; now that the whole torrent downloads rather than
+        // just the playing track, every row moves every tick and this is doing
+        // real work — a percent only changes so often.
         var pct = Math.round((t.progress || 0) * 100);
         var status = statusText(t);
         if (pct === lastPct && status === lastStatus) return;

@@ -1,7 +1,9 @@
 /* ============================================================================
    PRIMITIVES — theme-independent raw values.
-   Themes map these onto the semantic --color-* tokens. Component CSS must
-   never reference anything in this file directly.
+   The colour ramp is off-limits to components: themes map --mp-* onto the
+   semantic --color-* tokens, and a component reaching past that won't follow
+   the theme. The scales below it — type, space, radii, motion, stacking,
+   dimensions — are theme-independent and meant to be used directly.
    ========================================================================= */
 
 :root {
@@ -98,6 +100,19 @@
   --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
+
+  /* -- stacking order. Every z-index in the app comes from here, so the whole
+        order is legible in one place instead of being argued out one component
+        at a time. Gaps are deliberate: room to slot something in between.
+
+        Native <dialog> + showModal() and popovers live in the browser's TOP
+        LAYER, which sits above all of these no matter how large the number —
+        that is why the toast token below is only a fallback. */
+  --z-transport: 50;
+  --z-menu: 120;
+  --z-panel: 130;
+  --z-toast-fallback: 300;
+  --z-fatal: 400;
 
   /* -- layout dimensions */
   --sidebar-width: 264px;

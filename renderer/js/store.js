@@ -36,6 +36,12 @@
       defaultDownloadPath: '',
       prefetch: true,
       readDurations: false,
+      uploadLimit: 1500000,
+      pieceStrategy: 'auto',
+      expectedPath: 'auto',
+      homeNetwork: null,
+      peerEncryption: true,
+      torrentPort: null,
       version: '',
     },
     durations: new Map(),
@@ -119,6 +125,15 @@
     };
 
     var files = data.files != null ? data.files : existing ? existing.files : [];
+
+    // Counted once when the file list arrives rather than on every 500ms tick:
+    // "tracks" must mean playable media, not cue sheets and rip logs.
+    var mediaCount;
+    if (existing && existing.files === files && existing.mediaCount != null) {
+      mediaCount = existing.mediaCount;
+    } else {
+      mediaCount = (files || []).filter(window.MP.util.isMediaFile).length;
+    }
     var progress = data.progress != null ? data.progress : existing ? existing.progress || 0 : 0;
 
     // `done: true` is emitted exactly once and then the interval is cleared, so
@@ -131,6 +146,7 @@
       name: pick('name') || (existing && existing.name) || id,
       magnetURI: pick('magnetURI'),
       files: files || [],
+      mediaCount: mediaCount,
       fileProgress: data.fileProgress != null ? data.fileProgress : existing && existing.fileProgress,
       progress: progress,
       numPeers: data.numPeers != null ? data.numPeers : (existing && existing.numPeers) || 0,
@@ -201,6 +217,9 @@
   function select(id) {
     if (state.selectedTorrentId === id) return;
     state.selectedTorrentId = id;
+    // Per-file progress is expensive to compute in main — it walks every piece
+    // of every file — so it only does it for the torrent actually on screen.
+    if (window.playerAPI && window.playerAPI.setActiveTorrent) window.playerAPI.setActiveTorrent(id);
     emit('selection', id);
   }
 

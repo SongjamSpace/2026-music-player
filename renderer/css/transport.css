@@ -12,7 +12,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 50;
+  z-index: var(--z-transport);
   height: var(--transport-height);
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(360px, 2fr) minmax(180px, 1fr);

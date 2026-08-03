@@ -83,6 +83,13 @@
       spectrum: { on: true },
       presets: {},
       lastPreset: 'Flat',
+      // The parameters as they stood the moment `lastPreset` was recalled or
+      // saved. Anything else means the user has edited since, which is what the
+      // "modified" marker in the preset list reports. Captured rather than
+      // recomputed because applyPreset merges over the *current* state, so a
+      // preset that omits a module leaves it alone — there is no way to derive
+      // "what this preset resolved to" after the fact.
+      presetBasis: null,
     };
   }
 
@@ -194,6 +201,25 @@
     return JSON.parse(JSON.stringify(v));
   }
 
+  /**
+   * Structural equality. Deliberately not a JSON.stringify comparison: that
+   * silently depends on key insertion order, and the two sides being compared
+   * here reach the same shape by different routes.
+   */
+  function deepEqual(a, b) {
+    if (a === b) return true;
+    if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    var ka = Object.keys(a);
+    var kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (var i = 0; i < ka.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(b, ka[i])) return false;
+      if (!deepEqual(a[ka[i]], b[ka[i]])) return false;
+    }
+    return true;
+  }
+
   /** Returns a valid band, or null if it's too malformed to rescue. */
   function clampBand(raw, index) {
     if (!raw || typeof raw !== 'object') return null;
@@ -257,6 +283,13 @@
     if (raw.spectrum && typeof raw.spectrum.on === 'boolean') out.spectrum.on = raw.spectrum.on;
     if (typeof raw.lastPreset === 'string') out.lastPreset = raw.lastPreset;
 
+    // Only ever deep-compared, never fed to the audio graph, so it doesn't need
+    // the clamping the live parameters get — a corrupt basis can at worst
+    // mislabel a preset as modified.
+    if (raw.presetBasis && typeof raw.presetBasis === 'object' && !Array.isArray(raw.presetBasis)) {
+      out.presetBasis = clone(raw.presetBasis);
+    }
+
     if (raw.presets && typeof raw.presets === 'object' && !Array.isArray(raw.presets)) {
       Object.keys(raw.presets).slice(0, 50).forEach(function (name) {
         var p = raw.presets[name];
@@ -273,16 +306,14 @@
   }
 
   /** The parts of the state a preset captures — not lifecycle flags. */
+  var PRESET_KEYS = ['preamp', 'eq', 'crossfeed', 'width', 'comp', 'reverb', 'limiter'];
+
   function presetSnapshot(state) {
-    return clone({
-      preamp: state.preamp,
-      eq: state.eq,
-      crossfeed: state.crossfeed,
-      width: state.width,
-      comp: state.comp,
-      reverb: state.reverb,
-      limiter: state.limiter,
+    var out = {};
+    PRESET_KEYS.forEach(function (key) {
+      out[key] = clone(state[key]);
     });
+    return out;
   }
 
   window.MP.dspDefaults = {
@@ -299,7 +330,9 @@
     clampRange: clampRange,
     snapshot: snapshot,
     presetSnapshot: presetSnapshot,
+    PRESET_KEYS: PRESET_KEYS,
     clone: clone,
     clamp: clamp,
+    deepEqual: deepEqual,
   };
 })();
