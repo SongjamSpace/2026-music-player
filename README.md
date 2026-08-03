@@ -597,9 +597,33 @@ usual inline bootstrap and async IPC would flash the wrong theme.
 
 **Rendering.** Lists are keyed row components that hold element references and
 update in place; reordering uses `appendChild`, which moves an attached node.
-The 500 ms progress tick emits only `torrent:progress:<id>`, each row early-outs
+The 1 s progress tick emits only `torrent:progress:<id>`, each row early-outs
 on unchanged rounded values, and meters animate `transform: scaleX()` rather
 than `width`, so a steady-state tick does no layout at all.
+
+Anything on a per-interaction or per-tick path must be O(1) in list length, not
+O(n). Selection and the playing-track highlight touch only the rows that changed,
+the visible-index list is cached rather than re-queried, and a progress refresh
+early-outs entirely when the tick carried no new per-file data — which is three
+ticks in four. Album bodies get `content-visibility: auto`, so offscreen rows cost
+nothing to lay out.
+
+**There is deliberately no list virtualization**, and that is a measured decision
+rather than an omission. With the 242-file Aphex discography open — 221 rows, 5,275
+DOM nodes — an arrow keypress costs 0.23 ms, a four-character typeahead 0.8 ms, and
+forcing layout of the whole list 0.10 ms. Windowing would trade that for a real
+accessibility regression (a windowed listbox cannot keep `role="group"` around album
+bodies, and `aria-setsize` over recycled rows is a known-hard problem) in exchange
+for latency nobody can perceive.
+
+The number to watch is not tracks per album — the track list only ever shows one
+album — it is albums in the sidebar. Measured with a synthetic 1,000-album library:
+1,011 rows, 15,277 nodes, filtering 0.3 ms, selecting 2.0 ms, and about 62 KB of
+renderer memory per album. Comfortable well past a thousand albums. The cost that
+does scale is building those rows at startup, ~0.8 ms each, and that is DOM node
+creation — `content-visibility` was tried there and made no measurable difference,
+because layout was never the expensive part. If the sidebar ever needs to get
+cheaper, windowing *it* is the lever, and those are the numbers to beat.
 
 **Stacking.** Every `z-index` comes from the `--z-*` scale in
 `tokens.primitives.css`, so the order is legible in one place. Toasts are the
