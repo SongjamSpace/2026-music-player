@@ -57,6 +57,19 @@ function createPiecePolicy({ service, getPrefs }) {
   // The critical window we last applied, so an unmoved play head costs nothing.
   let lastWindow = { key: null, ranges: '' };
 
+  /**
+   * A torrent this tick is allowed to touch.
+   *
+   * `select`, `deselect` and `critical` all throw outright on a destroyed
+   * torrent (lib/torrent.js:972, :995, :1012), and a torrent can be removed
+   * between one tick and the next — the user pressing Remove is enough. An
+   * unguarded throw in a setInterval callback takes the whole main process
+   * down, so nothing here dereferences a torrent without passing this first.
+   */
+  function usable(torrent) {
+    return !!(torrent && !torrent.destroyed && torrent.ready && torrent.bitfield);
+  }
+
   /** How many contiguous pieces we already hold starting at the play head. */
   function contiguousFrom(torrent, startPiece, lastPiece) {
     const limit = Math.min(lastPiece, startPiece + BUFFER_SCAN_LIMIT);
@@ -102,11 +115,11 @@ function createPiecePolicy({ service, getPrefs }) {
     // Background torrents have no play head to protect, so rarest-first is
     // unambiguously right for them.
     for (const torrent of client.torrents) {
-      if (torrent === active || !torrent.ready) continue;
+      if (torrent === active || !usable(torrent)) continue;
       applyStrategy(torrent, mode === 'auto' ? 'rarest' : mode);
     }
 
-    if (!active || !active.ready || active.done) return;
+    if (!usable(active) || active.done) return;
 
     const file = active.files[playback.fileIndex];
     const duration = playback.duration;
@@ -178,11 +191,25 @@ function createPiecePolicy({ service, getPrefs }) {
     last = { strategy: active.strategy, headPiece, readahead, secondsBuffered };
   }
 
+  /**
+   * This is advisory optimisation, not correctness — downloads work without it,
+   * just less smoothly. So a bad tick must never be fatal: an uncaught throw
+   * inside a setInterval callback ends the main process, taking playback and
+   * every torrent with it, over what is at worst a dropped readahead update.
+   */
+  function safeTick() {
+    try {
+      tick();
+    } catch (err) {
+      console.error('[piece-policy] tick failed:', (err && err.message) || err);
+    }
+  }
+
   return {
     start() {
       if (timer) return;
       // unref so this tick can never be the reason the process stays alive.
-      timer = setInterval(tick, TICK_MS);
+      timer = setInterval(safeTick, TICK_MS);
       if (timer.unref) timer.unref();
     },
 

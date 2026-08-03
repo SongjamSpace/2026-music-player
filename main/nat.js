@@ -309,7 +309,10 @@ async function open(nextPorts) {
     retryTimer = setTimeout(() => {
       retryTimer = null;
       log('retrying port mapping');
-      open(ports);
+      // Floating promise otherwise: a rejection here surfaces as an unhandled
+      // rejection 30 seconds after startup, with no obvious connection to the
+      // router.
+      open(ports).catch((err) => log('retry failed: ' + err.message));
     }, RETRY_DELAY_MS);
     return status();
   }

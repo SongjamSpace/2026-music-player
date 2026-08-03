@@ -25,6 +25,38 @@ const swarmProbe = require('./swarm-probe');
 // keeps `npm start` and the built .app pointing at the same folder.
 app.setPath('userData', path.join(app.getPath('appData'), '2026-music-player'));
 
+// -- crash safety net --------------------------------------------------------
+//
+// An uncaught throw in the main process takes the whole app down instantly:
+// no macOS crash report (nothing crashed natively), no dialog, and stderr goes
+// nowhere when launched from Finder. The result is an app that "just
+// disappears" with no evidence at all, which is exactly what happened here.
+//
+// Two 1 Hz timers drive the torrent engine and both reach into WebTorrent
+// internals; several of those — select/deselect/critical — throw outright on a
+// torrent that was destroyed a moment earlier. Those call sites are guarded
+// individually, but this is the backstop that makes a miss survivable and,
+// more importantly, leaves a trace.
+
+const CRASH_LOG = path.join(app.getPath('userData'), 'errors.log');
+
+function recordError(kind, err) {
+  const detail = (err && (err.stack || err.message)) || String(err);
+  const line = '[' + new Date().toISOString() + '] ' + kind + '\n' + detail + '\n\n';
+  console.error('[' + kind + ']', detail);
+  try {
+    fs.appendFileSync(CRASH_LOG, line);
+  } catch (_) {
+    /* logging must never be the thing that kills us */
+  }
+}
+
+// Deliberately does NOT rethrow. A failed progress tick or a stale torrent
+// handle is not a reason to drop playback and lose the user's session; it is a
+// reason to write it down and carry on.
+process.on('uncaughtException', (err) => recordError('uncaughtException', err));
+process.on('unhandledRejection', (err) => recordError('unhandledRejection', err));
+
 const store = new Store();
 const torrentService = new TorrentService();
 const piecePolicy = createPiecePolicy({
@@ -339,6 +371,17 @@ app.whenReady().then(async () => {
     secure: getPrefs().peerEncryption !== false,
     trackers,
   });
+
+  // A destroyed client is unrecoverable in place, so say so plainly rather than
+  // letting the user watch 0 B/s and conclude the swarms are dead.
+  torrentService.onClientError = (info) => {
+    recordError('torrent client error', new Error(info.message));
+    send('torrent-error', {
+      message: info.fatal
+        ? 'The torrent engine stopped (' + info.message + '). Restart the app to resume downloads.'
+        : 'Torrent engine warning: ' + info.message,
+    });
+  };
 
   netPath.setExpected(getPrefs().expectedPath);
   netPath.setHome(getPrefs().homeNetwork);

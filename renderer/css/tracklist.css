@@ -364,6 +364,90 @@
 }
 
 /* Footnote for non-media files kept out of the list. */
+/* ---- album sections ------------------------------------------------------
+   A discography torrent is many records in one list, so each gets a section
+   header. Only ever rendered when a torrent actually holds two or more albums;
+   a single-album torrent is pixel-identical to before. */
+
+.tgroup__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 34px;
+  padding: 0 var(--space-4);
+  margin-top: var(--space-5);
+  /* Beneath .tracklist__head, never over it: that one is 30px tall, sticky at
+     z-index 2, and lives outside this <ul>, so it must stay on top. */
+  position: sticky;
+  top: calc(var(--space-7) * -1 + 30px);
+  z-index: 1;
+  background: var(--color-bg-content);
+  border-bottom: 1px solid var(--color-separator);
+}
+
+.tgroup:first-child .tgroup__head {
+  margin-top: 0;
+}
+
+.tgroup__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+}
+
+/* Same disclosure idiom as .net-panel__toggle. */
+.tgroup__chev {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.tgroup__toggle[aria-expanded='true'] .tgroup__chev {
+  transform: rotate(90deg);
+}
+
+.tgroup__name {
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.tgroup__meta {
+  flex: 0 0 auto;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* Hidden until pointed at, so eighteen headers don't read as thirty-six
+   buttons competing with the track rows. */
+.tgroup__actions {
+  display: flex;
+  gap: var(--space-1);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.tgroup__head:hover .tgroup__actions,
+.tgroup__head:focus-within .tgroup__actions {
+  opacity: 1;
+}
+
+.tgroup__body[hidden],
+.tgroup[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tgroup__chev {
+    transition: none;
+  }
+}
+
 .tracklist__note {
   display: flex;
   align-items: center;

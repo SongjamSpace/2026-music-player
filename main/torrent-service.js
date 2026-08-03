@@ -88,6 +88,12 @@ class TorrentService {
     // connected in" is proof the forwarded port works, and that is the single
     // fact that decides whether small swarms will ever move.
     this.inboundPeak = 0;
+
+    // Set if the WebTorrent client ever errors. A listen-socket error destroys
+    // the client outright, so this is the difference between "the swarm is
+    // quiet" and "nothing will ever download again until you restart".
+    this.clientError = null;
+    this.onClientError = null;
   }
 
   // -- metadata cache ------------------------------------------------------
@@ -228,8 +234,18 @@ class TorrentService {
 
     // Without a listener webtorrent rethrows, taking the whole main process
     // (and playback) down over something like a single bad tracker URL.
+    //
+    // Worse, this is not merely informational: any error on the listen socket
+    // runs `client._destroy(err)` (lib/conn-pool.js:41), which tears down the
+    // entire client. Every torrent stops, and every later call throws "client
+    // is destroyed". Logging alone made that look identical to a dead swarm —
+    // hours of nothing with no explanation — so the state is recorded and
+    // surfaced instead of swallowed.
     this.client.on('error', (err) => {
-      console.error('[torrent] client error:', (err && err.message) || err);
+      const message = (err && err.message) || String(err);
+      console.error('[torrent] client error:', message);
+      this.clientError = { message, at: Date.now(), fatal: !!this.client && this.client.destroyed };
+      if (typeof this.onClientError === 'function') this.onClientError(this.clientError);
     });
 
     return Promise.resolve();
@@ -360,37 +376,44 @@ class TorrentService {
       this._sampleInbound();
 
       for (const [publicId, entry] of this.reporters) {
-        const t = this._get(publicId);
-        if (!t || t.destroyed) {
-          this.reporters.delete(publicId);
-          this.fileProgressCache.delete(publicId);
-          continue;
+        // Per-torrent, because one torrent tearing down mid-tick must not stop
+        // the other seven from reporting — and an uncaught throw in here would
+        // end the main process outright, losing playback over a status update.
+        try {
+          const t = this._get(publicId);
+          if (!t || t.destroyed) {
+            this.reporters.delete(publicId);
+            this.fileProgressCache.delete(publicId);
+            continue;
+          }
+
+          const payload = {
+            id: publicId,
+            progress: t.progress,
+            numPeers: t.numPeers,
+            downloadSpeed: t.downloadSpeed,
+            uploadSpeed: t.uploadSpeed,
+            timeRemaining: t.timeRemaining,
+            downloaded: t.downloaded,
+            length: t.length,
+          };
+
+          // Newly finished torrents get one final full payload so the UI settles
+          // on exact numbers rather than whatever the last sampled tick showed.
+          if (t.done && !entry.doneReported) {
+            entry.doneReported = true;
+            payload.progress = 1;
+            payload.timeRemaining = 0;
+            payload.done = true;
+            payload.fileProgress = t.files.map((f) => ({ progress: 1, downloaded: f.length }));
+          } else if (wantFiles && publicId === this.activeTorrentId) {
+            payload.fileProgress = this._fileProgressFor(publicId, t);
+          }
+
+          entry.onProgress(payload);
+        } catch (err) {
+          console.error('[torrent] progress tick failed for', publicId, '-', err.message);
         }
-
-        const payload = {
-          id: publicId,
-          progress: t.progress,
-          numPeers: t.numPeers,
-          downloadSpeed: t.downloadSpeed,
-          uploadSpeed: t.uploadSpeed,
-          timeRemaining: t.timeRemaining,
-          downloaded: t.downloaded,
-          length: t.length,
-        };
-
-        // Newly finished torrents get one final full payload so the UI settles
-        // on exact numbers rather than whatever the last sampled tick showed.
-        if (t.done && !entry.doneReported) {
-          entry.doneReported = true;
-          payload.progress = 1;
-          payload.timeRemaining = 0;
-          payload.done = true;
-          payload.fileProgress = t.files.map((f) => ({ progress: 1, downloaded: f.length }));
-        } else if (wantFiles && publicId === this.activeTorrentId) {
-          payload.fileProgress = this._fileProgressFor(publicId, t);
-        }
-
-        entry.onProgress(payload);
       }
 
       if (!this.reporters.size) {
@@ -707,6 +730,8 @@ class TorrentService {
         baseline: BASELINE,
       },
       trackers: this.trackers ? this.trackers.status() : null,
+      clientError: this.clientError || null,
+      clientDestroyed: !!client.destroyed,
       inboundNow,
       inboundPeak: this.inboundPeak,
       torrent: null,

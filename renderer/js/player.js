@@ -7,6 +7,8 @@
   var active = null;
 
   var queue = [];      // file indices, in play order
+  // One-shot queue handed to the next play() call — see playScoped().
+  var pendingQueue = null;
   var queuePos = -1;
   var watchdog = null;
   var lastTimeAt = 0;
@@ -26,12 +28,15 @@
 
   // -- queue ---------------------------------------------------------------
 
+  /**
+   * Playable indices in track-list order.
+   *
+   * Delegates to MP.albums so the queue always matches what is on screen. On a
+   * multi-album torrent the list is ordered by album, not by file index, and a
+   * queue built from raw file order would advance to tracks the user cannot see.
+   */
   function playableIndices(torrent) {
-    var out = [];
-    (torrent.files || []).forEach(function (f, i) {
-      if (MP.util.isPlayable(f)) out.push(i);
-    });
-    return out;
+    return MP.albums.orderedIndices(torrent);
   }
 
   /**
@@ -110,7 +115,11 @@
     }
 
     var switchingTorrent = pb().torrentId !== torrentId;
-    if (switchingTorrent || queue.indexOf(fileIndex) === -1) {
+    if (pendingQueue && pendingQueue.torrentId === torrentId) {
+      queue = pb().shuffle ? shuffled(pendingQueue.indices, fileIndex) : pendingQueue.indices.slice();
+      queuePos = queue.indexOf(fileIndex);
+      pendingQueue = null;
+    } else if (switchingTorrent || queue.indexOf(fileIndex) === -1) {
       buildQueue(torrentId, fileIndex);
     } else {
       queuePos = queue.indexOf(fileIndex);
@@ -169,6 +178,30 @@
     if (shuffle !== pb().shuffle) setShuffle(!!shuffle, true);
     buildQueue(torrentId, null);
     play(torrentId, pb().shuffle ? queue[0] : indices[0]);
+  }
+
+  /**
+   * Play a caller-defined subset — one album, from its section header.
+   *
+   * Handed over as a pending value rather than assigning `queue` directly,
+   * because play() rebuilds the queue whenever the index it is given isn't
+   * already in it, which is exactly the case when the album belongs to a
+   * torrent we aren't playing yet.
+   *
+   * Self-healing by design: once this queue is live, double-clicking a track in
+   * a different album fails the same `indexOf` test and falls back to the
+   * whole-torrent queue with no extra code.
+   */
+  function playScoped(torrentId, indices, shuffle) {
+    if (!indices || !indices.length) return;
+    var playable = indices.filter(function (i) {
+      var t = MP.store.getTorrent(torrentId);
+      return t && t.files[i] && MP.util.isPlayable(t.files[i]);
+    });
+    if (!playable.length) return;
+    if (shuffle != null && !!shuffle !== pb().shuffle) setShuffle(!!shuffle, true);
+    pendingQueue = { torrentId: torrentId, indices: playable };
+    play(torrentId, pb().shuffle ? playable[Math.floor(Math.random() * playable.length)] : playable[0]);
   }
 
   /** Insert a track directly after the current one without disturbing the rest. */
@@ -540,6 +573,7 @@
     play: play,
     playAll: playAll,
     playNextUp: playNextUp,
+    playScoped: playScoped,
     next: next,
     prev: prev,
     toggle: toggle,

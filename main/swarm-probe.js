@@ -73,6 +73,10 @@ function announce(host, port, infoHash) {
     socket.on('error', (err) => finish({ ok: false, error: err.code || err.message, peers: [] }));
 
     socket.on('message', (msg) => {
+      // A message can land in the same turn the timeout fires and closes the
+      // socket; sending on a closed dgram socket throws synchronously, and a
+      // throw inside an event handler is uncaught and would end the process.
+      if (settled) return;
       if (msg.length >= 16 && msg.readUInt32BE(0) === ACTION_CONNECT) {
         const req = Buffer.concat([
           msg.slice(8, 16), // connection id
@@ -91,7 +95,11 @@ function announce(host, port, infoHash) {
           Buffer.from([255, 255, 255, 255]), // num_want: -1 = as many as you have
           Buffer.from([0x1a, 0xe1]), // port 6881
         ]);
-        socket.send(req, port, host);
+        try {
+          socket.send(req, port, host);
+        } catch (err) {
+          finish({ ok: false, error: err.code || err.message, peers: [] });
+        }
         return;
       }
       if (msg.length >= 20 && msg.readUInt32BE(0) === ACTION_ANNOUNCE) {

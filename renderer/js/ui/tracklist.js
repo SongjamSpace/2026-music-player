@@ -11,6 +11,32 @@
   var renderedCount = -1; // file count the current DOM reflects
   var typeahead = { buffer: '', timer: null };
 
+  // Album sections. `groupOf` maps a file index to its group key so the filter
+  // and the playing-track highlight can find a row's section in O(1).
+  var groups = new Map(); // groupKey -> group component
+  var groupOf = new Map(); // fileIndex -> groupKey
+  // Collapse state per torrent, kept at module scope so it survives render(),
+  // which rebuilds the list wholesale every time the file count moves. Losing
+  // every open section to a metadata tick would make the list feel unreliable.
+  // In memory only: collapse is a browsing posture, not a preference.
+  var collapsedByTorrent = new Map(); // torrentId -> Set(groupKey)
+  var touchedTorrents = new Set(); // user has hand-adjusted these; stop auto-collapsing
+
+  // Four albums and their tracks still fit on screen. Above that the list is a
+  // wall you have to scroll past to find anything, so it becomes an index.
+  var AUTO_COLLAPSE_ABOVE = 4;
+
+  function collapsedSet(torrentId) {
+    if (!collapsedByTorrent.has(torrentId)) collapsedByTorrent.set(torrentId, new Set());
+    return collapsedByTorrent.get(torrentId);
+  }
+
+  /** Visible means the row is shown AND its album isn't collapsed. */
+  function isRowVisible(el) {
+    if (el.hidden) return false;
+    return !(el.parentNode && el.parentNode.hidden);
+  }
+
   function createRow(torrent, file, index, ordinal) {
     var el = MP.util.tpl('#tpl-track-row');
     el.dataset.index = String(index);
@@ -104,21 +130,178 @@
   function clearRows() {
     rows.forEach(function (r) { r.destroy(); });
     rows.clear();
+    groups.clear();
+    groupOf.clear();
   }
 
+  /**
+   * Filtering and collapsing are kept separate on purpose.
+   *
+   * Collapse hides a whole group's `<ul>` body in one move; the filter hides
+   * individual rows. If both drove `row.setVisible` they would overwrite each
+   * other, and a match inside a collapsed album would be unreachable. So while
+   * a query is active every group is force-expanded — a hit you cannot see
+   * reads as no hit at all — and the prior collapse state is restored the
+   * moment the field is cleared.
+   */
   function applyFilter() {
     var q = MP.store.state.ui.filter.trim().toLowerCase();
+    var collapsed = collapsedSet(currentId);
+    var hits = new Map();
     var visible = 0;
+
     rows.forEach(function (row) {
       var match = !q || row.name.toLowerCase().indexOf(q) !== -1;
       row.setVisible(match);
-      if (match) visible++;
+      if (!match) return;
+      visible++;
+      var key = groupOf.get(row.index);
+      if (key !== undefined) hits.set(key, (hits.get(key) || 0) + 1);
     });
+
+    groups.forEach(function (g, key) {
+      var n = hits.get(key) || 0;
+      // A header stranded over an album with no matches reads as a broken
+      // filter, so the whole group goes.
+      g.setVisible(!q || n > 0);
+      g.setCollapsed(q ? false : collapsed.has(key));
+      g.setMatchCount(q ? n : null);
+    });
+
     return visible;
+  }
+
+  function toggleGroup(key) {
+    var collapsed = collapsedSet(currentId);
+    if (collapsed.has(key)) collapsed.delete(key);
+    else collapsed.add(key);
+    touchedTorrents.add(currentId);
+    applyFilter();
+    // Selection may have been sitting inside the section that just closed.
+    var focused = rows.get(focusedIndex);
+    if (focused && !isRowVisible(focused.el)) {
+      var vis = visibleIndices();
+      if (vis.length) selectIndex(vis[0]);
+    }
+  }
+
+  /**
+   * An album section: a `role="group"` wrapper holding a head and a `<ul>` of
+   * rows.
+   *
+   * The nested list is what makes collapsing cheap and correct — one `hidden`
+   * on the body rather than a flag on each of two hundred rows, and it leaves
+   * the filter as the sole owner of per-row visibility. It is also the ARIA
+   * shape a listbox actually permits: a bare `<li>` header among `role="option"`
+   * siblings is invalid, whereas a listbox may contain groups.
+   */
+  function createGroup(torrent, info, ordinal) {
+    var el = MP.util.el('li', 'tgroup');
+    el.setAttribute('role', 'group');
+    el.setAttribute('aria-label', info.name);
+
+    var head = MP.util.el('div', 'tgroup__head');
+    head.setAttribute('role', 'presentation');
+
+    var bodyId = 'tgroup-body-' + ordinal;
+    var toggle = MP.util.el('button', 'tgroup__toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'true');
+    toggle.setAttribute('aria-controls', bodyId);
+
+    var chev = MP.util.el('span', 'tgroup__chev');
+    MP.icons.set(chev, 'chevron', 14);
+    toggle.appendChild(chev);
+    toggle.appendChild(MP.util.el('span', 'tgroup__name truncate', info.name));
+    var metaEl = MP.util.el('span', 'tgroup__meta tnum');
+    toggle.appendChild(metaEl);
+    toggle.addEventListener('click', function () { toggleGroup(info.key); });
+
+    var actions = MP.util.el('span', 'tgroup__actions');
+    var playBtn = MP.util.el('button', 'icon-btn tgroup__play');
+    playBtn.type = 'button';
+    playBtn.setAttribute('aria-label', 'Play ' + info.name);
+    MP.icons.set(playBtn, 'play', 14);
+    playBtn.addEventListener('click', function () {
+      // Plays from this album's first track using the ordinary whole-torrent
+      // queue, so it rolls on into the next album at the end. A queue that
+      // stopped dead at an album boundary would read as a bug in a player that
+      // otherwise always auto-advances.
+      MP.player.play(torrent.id, info.indices[0]);
+    });
+    var shuffleBtn = MP.util.el('button', 'icon-btn tgroup__shuffle');
+    shuffleBtn.type = 'button';
+    shuffleBtn.setAttribute('aria-label', 'Shuffle ' + info.name);
+    MP.icons.set(shuffleBtn, 'shuffle', 14);
+    shuffleBtn.addEventListener('click', function () {
+      // Scoped, unlike Play: shuffling 221 tracks from a button labelled with
+      // one album's name would be a lie about what the button does.
+      MP.player.playScoped(torrent.id, info.indices, true);
+    });
+    actions.appendChild(playBtn);
+    actions.appendChild(shuffleBtn);
+
+    head.appendChild(toggle);
+    head.appendChild(actions);
+
+    var body = MP.util.el('ul', 'tgroup__body');
+    body.id = bodyId;
+    body.setAttribute('role', 'presentation');
+
+    el.appendChild(head);
+    el.appendChild(body);
+
+    var countLabel = info.indices.length + (info.indices.length === 1 ? ' track' : ' tracks');
+    var bytes = 0;
+    info.indices.forEach(function (i) { bytes += (torrent.files[i] || {}).length || 0; });
+    var lastPct = -1;
+
+    var api = {
+      el: el,
+      body: body,
+      key: info.key,
+      indices: info.indices,
+      setVisible: function (on) { el.hidden = !on; },
+      setCollapsed: function (on) {
+        body.hidden = !!on;
+        el.classList.toggle('is-collapsed', !!on);
+        toggle.setAttribute('aria-expanded', on ? 'false' : 'true');
+      },
+      isCollapsed: function () { return !!body.hidden; },
+      setMatchCount: function (n) {
+        api._match = n;
+        api.updateProgress(true);
+      },
+      /**
+       * Length-weighted, not a plain mean: a forty-second interlude should not
+       * count as much as a ten-minute track. Guarded on the rounded percent so
+       * the 1 Hz tick doesn't touch the DOM for nothing.
+       */
+      updateProgress: function (force) {
+        var got = 0;
+        var total = 0;
+        info.indices.forEach(function (i) {
+          var len = (torrent.files[i] || {}).length || 0;
+          total += len;
+          got += MP.store.fileProgress(torrent.id, i) * len;
+        });
+        var pct = total ? Math.round((got / total) * 100) : 0;
+        if (!force && pct === lastPct) return;
+        lastPct = pct;
+        var right = pct >= 100 ? 'Downloaded' : pct === 0 ? 'Queued' : pct + '%';
+        metaEl.textContent = api._match != null
+          ? api._match + ' of ' + countLabel + ' matching'
+          : countLabel + ' · ' + MP.util.formatBytes(bytes) + ' · ' + right;
+      },
+    };
+    api._match = null;
+    api.updateProgress(true);
+    return api;
   }
 
   function refreshProgress() {
     rows.forEach(function (row) { row.updateProgress(); });
+    groups.forEach(function (g) { g.updateProgress(); });
   }
 
   function paintPlaying() {
@@ -127,6 +310,17 @@
       var isCurrent = pb.torrentId === currentId && pb.fileIndex === row.index;
       row.setPlaying(isCurrent, !pb.isPlaying);
     });
+
+    // Open the album that's playing. Pressing Play on a collapsed section and
+    // having it stay shut — with no visible sign of which track started —
+    // reads as the button not working. Only fires on a track change, so
+    // deliberately collapsing an album mid-play still sticks.
+    if (pb.torrentId !== currentId || pb.fileIndex == null) return;
+    var g = groups.get(groupOf.get(pb.fileIndex));
+    if (g && g.isCollapsed()) {
+      collapsedSet(currentId).delete(g.key);
+      applyFilter();
+    }
   }
 
   function render(id) {
@@ -181,10 +375,29 @@
     listEl.textContent = '';
     headEl.hidden = false;
 
+    // A discography arrives as one flat list of hundreds of tracks. The
+    // torrent's own folder names already say which record each belongs to, so
+    // split on that — no tags, no downloaded bytes, correct from the moment
+    // metadata lands. Falls back to the plain list for a single-album torrent.
+    var plan = MP.albums.group(t);
+    var byIndex = new Map();
+    if (plan.grouped) {
+      plan.groups.forEach(function (info, n) {
+        var g = createGroup(t, info, n);
+        groups.set(info.key, g);
+        listEl.appendChild(g.el);
+        info.indices.forEach(function (i) {
+          groupOf.set(i, info.key);
+          byIndex.set(i, g.body);
+        });
+      });
+    }
+
     // Only media is listed. Images become the album artwork, and everything
     // else — cue sheets, rip logs, .accurip/.toc checksums, readmes — is
-    // packaging, not tracks. Numbering stays contiguous over what's shown.
+    // packaging, not tracks.
     var ordinal = 0;
+    var perGroup = new Map();
     var first = null;
     var hidden = 0;
     t.files.forEach(function (file, index) {
@@ -192,20 +405,50 @@
         if (!MP.util.isImageFile(file)) hidden++;
         return;
       }
-      ordinal++;
-      var row = createRow(t, file, index, ordinal);
+      // Numbering restarts inside each album: the "#" column means the track's
+      // place on that record, and counting to 221 across a discography says
+      // nothing. Ungrouped lists stay contiguous exactly as before.
+      var n;
+      if (plan.grouped) {
+        var key = groupOf.get(index);
+        n = (perGroup.get(key) || 0) + 1;
+        perGroup.set(key, n);
+      } else {
+        n = ++ordinal;
+      }
+      var row = createRow(t, file, index, n);
       rows.set(index, row);
-      listEl.appendChild(row.el);
+      (byIndex.get(index) || listEl).appendChild(row.el);
       if (first === null) first = index;
     });
 
     if (hidden) listEl.appendChild(buildHiddenNote(hidden, id));
+
+    if (plan.grouped) applyCollapsePolicy(id, plan);
 
     if (first !== null) rows.get(first).setSelected(true);
     focusedIndex = first === null ? 0 : first;
     applyFilter();
     paintPlaying();
     unsubProgress = MP.store.subscribe('torrent:progress:' + id, refreshProgress);
+  }
+
+  /**
+   * Decide what starts open. Small torrents behave exactly as they always have;
+   * a discography opens as a short, scannable index instead of a wall. Once the
+   * user has opened or closed anything themselves we stop second-guessing them.
+   */
+  function applyCollapsePolicy(torrentId, plan) {
+    if (touchedTorrents.has(torrentId)) return;
+    var collapsed = collapsedSet(torrentId);
+    collapsed.clear();
+    if (plan.groups.length <= AUTO_COLLAPSE_ABOVE) return;
+
+    var pb = MP.store.state.playback;
+    var playingKey = pb.torrentId === torrentId ? groupOf.get(pb.fileIndex) : undefined;
+    plan.groups.forEach(function (info) {
+      if (info.key !== playingKey) collapsed.add(info.key);
+    });
   }
 
   var SWARM_TIMEOUT_MS = 25000;
@@ -285,6 +528,13 @@
   function selectIndex(index) {
     var row = rows.get(index);
     if (!row || row.el.hidden) return;
+    // Focusing inside a collapsed album is a no-op, so open it first — this is
+    // how the playing track stays reachable when its section is shut.
+    var g = groups.get(groupOf.get(index));
+    if (g && g.isCollapsed()) {
+      collapsedSet(currentId).delete(g.key);
+      applyFilter();
+    }
     rows.forEach(function (r) { r.setSelected(false); });
     row.setSelected(true);
     focusedIndex = index;
@@ -292,12 +542,22 @@
     row.el.scrollIntoView({ block: 'nearest' });
   }
 
+  /**
+   * DOM order, not file-index order.
+   *
+   * Once albums exist, arrow keys have to walk what is actually on screen: a
+   * collapsed album must be skipped whole, which a sorted list of file indices
+   * cannot express. Reading the DOM also keeps navigation honest for free if
+   * the visual order ever stops matching file order.
+   */
   function visibleIndices() {
     var out = [];
-    rows.forEach(function (row, index) {
-      if (!row.el.hidden) out.push(index);
-    });
-    return out.sort(function (a, b) { return a - b; });
+    var nodes = listEl.querySelectorAll('.track-row');
+    for (var i = 0; i < nodes.length; i++) {
+      if (!isRowVisible(nodes[i])) continue;
+      out.push(Number(nodes[i].dataset.index));
+    }
+    return out;
   }
 
   function moveSelection(delta) {
@@ -381,6 +641,9 @@
 
     listEl.addEventListener('keydown', function (e) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Group buttons live inside the list; let them keep their own key
+      // handling instead of hijacking arrows for row selection.
+      if (e.target.closest && e.target.closest('.tgroup__head')) return;
       switch (e.key) {
         case 'ArrowDown': e.preventDefault(); moveSelection(1); break;
         case 'ArrowUp': e.preventDefault(); moveSelection(-1); break;
