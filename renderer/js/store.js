@@ -156,6 +156,12 @@
       length: pick('length'),
       done: done,
       pending: data.pending === true ? true : files && files.length > 0 ? false : existing ? existing.pending : false,
+      // Lifecycle, from main: whether a torrent is currently live for this album and
+      // which state the index records. Carried forward rather than picked, because a
+      // progress tick omits both and `false` is a meaningful value that `pick()`
+      // would treat as absent.
+      live: data.live != null ? data.live : existing ? existing.live : undefined,
+      state: data.state != null ? data.state : existing ? existing.state : undefined,
       lastUpdate: performance.now(),
     };
 

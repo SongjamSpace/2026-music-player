@@ -76,19 +76,33 @@
   function openRowMenu(id, at) {
     var t = MP.store.getTorrent(id);
     if (!t) return;
-    MP.menu.open(
-      at,
-      [
-        { label: 'Play All', onClick: function () { MP.store.select(id); MP.player.playAll(id, false); } },
-        { label: 'Shuffle Play', onClick: function () { MP.store.select(id); MP.player.playAll(id, true); } },
-        '-',
-        { label: 'Reveal in Finder', onClick: function () { MP.actions.openTorrentFolder(id); } },
-        '-',
-        { label: 'Remove from Library', danger: true, onClick: function () { MP.actions.removeTorrent(id, false); } },
-        { label: 'Remove and Delete Files…', danger: true, onClick: function () { MP.actions.removeTorrent(id, true); } },
-      ],
-      id
+
+    var items = [
+      { label: 'Play All', onClick: function () { MP.store.select(id); MP.player.playAll(id, false); } },
+      { label: 'Shuffle Play', onClick: function () { MP.store.select(id); MP.player.playAll(id, true); } },
+      '-',
+    ];
+
+    // Lifecycle, offered only when it would do something. A completed album stops
+    // seeding once its grace window expires, so Seed is the way back into the swarm;
+    // an incomplete album that isn't live is queued behind the live-torrent cap.
+    if (t.live === false) {
+      items.push(
+        t.done
+          ? { label: 'Seed This Album', onClick: function () { MP.actions.seedAlbum(id); } }
+          : { label: 'Resume Download', onClick: function () { MP.actions.resumeAlbum(id); } }
+      );
+      items.push('-');
+    }
+
+    items.push(
+      { label: 'Reveal in Finder', onClick: function () { MP.actions.openTorrentFolder(id); } },
+      '-',
+      { label: 'Remove from Library', danger: true, onClick: function () { MP.actions.removeTorrent(id, false); } },
+      { label: 'Remove and Delete Files…', danger: true, onClick: function () { MP.actions.removeTorrent(id, true); } }
     );
+
+    MP.menu.open(at, items, id);
   }
 
   function syncProgressSub(id) {

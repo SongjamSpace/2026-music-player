@@ -77,10 +77,38 @@
       });
   }
 
+  /**
+   * Bring an archived album back into the swarm so it can upload.
+   *
+   * Completed albums stop seeding after a grace window, so they cost nothing while
+   * sitting in the library. This is the way back in when you want to give back to a
+   * specific swarm.
+   */
+  function seedAlbum(id) {
+    var t = MP.store.getTorrent(id);
+    var name = (t && t.name) || 'this album';
+    return window.playerAPI.seedAlbum(id).then(function (res) {
+      if (res && res.success) MP.toast.show('Seeding “' + name + '”.');
+      else MP.toast.error('Couldn’t start seeding “' + name + '”.');
+    });
+  }
+
+  /** Start a download that is queued behind the live-torrent cap. */
+  function resumeAlbum(id) {
+    var t = MP.store.getTorrent(id);
+    var name = (t && t.name) || 'this album';
+    return window.playerAPI.resumeAlbum(id).then(function (res) {
+      if (res && res.success) MP.toast.show('Resumed “' + name + '”.');
+      else MP.toast.error('Couldn’t resume “' + name + '”.');
+    });
+  }
+
   window.MP.actions = {
     addMagnet: addMagnet,
     openTorrentFolder: openTorrentFolder,
     openDownloadFolder: openDownloadFolder,
     removeTorrent: removeTorrent,
+    seedAlbum: seedAlbum,
+    resumeAlbum: resumeAlbum,
   };
 })();

@@ -27,6 +27,11 @@ contextBridge.exposeInMainWorld('playerAPI', {
   // UI only ever shows one album's tracks at a time.
   getLibrary: () => ipcRenderer.invoke('get-library'),
   getLibraryTracks: (albumId) => ipcRenderer.invoke('get-library-tracks', albumId),
+
+  // Lifecycle, for when the automatic policy isn't what the user wants: seeding an
+  // album that has already archived, or resuming a download queued behind the cap.
+  seedAlbum: (albumId) => ipcRenderer.invoke('seed-album', albumId),
+  resumeAlbum: (albumId) => ipcRenderer.invoke('resume-album', albumId),
   removeTorrent: (torrentId, destroyStore) =>
     ipcRenderer.invoke('remove-torrent', torrentId, destroyStore),
 

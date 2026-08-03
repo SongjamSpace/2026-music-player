@@ -192,6 +192,55 @@ verification. Measured on the real library that is 11 albums and 1,070 tracks in
 1.2 MB and loads in ~5 ms, which is what makes holding it in memory the right call
 rather than reaching for SQLite.
 
+## Which torrents are live
+
+`main/torrent-manager.js` owns lifecycle: which albums have a WebTorrent object at
+all. Everything else about a torrent — client options, activation, the progress
+ticker, the metadata caches — stays in `main/torrent-service.js`.
+
+It exists because the app used to add every saved magnet at boot and never destroy a
+completed torrent, so a live torrent existed for every album ever added. Each one
+costs a piece cache, up to `maxConns` wires, a bitfield and an HTTP server, which is
+why footprint tracked library size rather than activity.
+
+| state | torrent | meaning |
+|---|---|---|
+| `downloading` | live | incomplete, counts against the cap |
+| `seeding` | live | complete, counts against the cap |
+| `idle` | none | complete on disk, but nothing cached to wake from |
+| `archived` | none | complete, and we hold metadata — waking is instant and offline |
+| `missing` | none | the files are not where the index says |
+
+The policy:
+
+- **Nothing is added at boot.** The UI renders from the index. Incomplete albums
+  auto-resume *after first paint*, up to 3 at once, most-nearly-finished first.
+- **A completed album seeds for 30 minutes, then archives.** That gives back when it
+  is most useful to the swarm, without a standing cost. Two completed albums stay
+  live at a time, oldest archived first.
+- **An album that is actively uploading is never yanked.** The window extends while
+  upload continues, up to a two-hour ceiling so a popular album cannot seed forever.
+- **Waking is lazy and deduplicated.** Playing a track that is not on disk wakes its
+  album; three concurrent callers produce one `add()`, because WebTorrent errors on
+  adding an infohash it already has.
+- **Nothing is woken when the drive is unavailable** — waking would have WebTorrent
+  see 0% and re-download the album.
+
+`archived` and `idle` are distinguished precisely because of that "instant and
+offline" clause: with a cached `.torrent`, waking needs no peers at all.
+
+Two things this breaks unless handled, and both are:
+
+- The file server and *Reveal in Finder* both fall back to the index when there is no
+  live torrent, or every archived album would become unplayable and unfindable.
+- States are reconciled at startup. `downloading` and `seeding` describe a live
+  torrent, and nothing is live when the process starts — so a crash or a quit
+  mid-seed would otherwise leave those recorded and wrong for the whole next session.
+
+Measured on the real library: 3 live torrents instead of 11, with all 11 albums
+listed and playable. The 8 completed albums cost nothing, which is the property that
+has to hold as the library grows.
+
 ## Playing from disk
 
 A file that is already complete is read directly, by a single long-lived HTTP server

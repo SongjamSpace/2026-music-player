@@ -584,6 +584,11 @@ class TorrentService {
 
       onTorrentReady({
         id: publicId,
+        // True by definition here, and it has to be said explicitly: the boot
+        // snapshot is taken before the lifecycle manager wakes anything, so without
+        // this the renderer would keep believing every album is asleep and offer to
+        // resume downloads that are already running.
+        live: true,
         name: t.name,
         magnetURI: t.magnetURI,
         files: this._describeFiles(t, baseUrl),
@@ -1123,6 +1128,42 @@ class TorrentService {
   getTorrentPath(torrentId) {
     const torrent = this._get(torrentId);
     return torrent ? torrent.path || null : null;
+  }
+
+  /** The library id for a real infohash, following the alias map backwards. */
+  publicIdFor(infoHash) {
+    if (!infoHash) return null;
+    return this.publicIds.get(infoHash) || infoHash;
+  }
+
+  /**
+   * Take a torrent down without forgetting it.
+   *
+   * The difference from `remove()` is everything: this keeps the files, keeps the
+   * cached `.torrent` and keeps the modtimes, so the album can be woken again
+   * instantly and offline. `remove()` is the user deleting an album; this is the
+   * lifecycle manager putting one to sleep.
+   *
+   * Per-torrent state that describes the *live* torrent is dropped, because a woken
+   * torrent rebuilds it. The alias is deliberately kept: it maps the library id onto
+   * the infohash a local seed actually uses, and without it a re-wake would not know
+   * the two are the same album.
+   */
+  async sleep(publicId) {
+    if (!this.client) return;
+    const server = this.torrentServers.get(publicId);
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+      this.torrentServers.delete(publicId);
+      this.torrentServerUrls.delete(publicId);
+    }
+    const real = this.aliases.get(publicId) || publicId;
+    this.selectionState.delete(real);
+    this.pendingSelections.delete(real);
+    this.reporters.delete(publicId);
+    this.fileProgressCache.delete(publicId);
+    if (this.activeTorrentId === publicId) this.activeTorrentId = null;
+    await this.client.remove(real, { destroyStore: false });
   }
 
   async remove(torrentId, destroyStore = false) {
