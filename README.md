@@ -192,6 +192,30 @@ verification. Measured on the real library that is 11 albums and 1,070 tracks in
 1.2 MB and loads in ~5 ms, which is what makes holding it in memory the right call
 rather than reaching for SQLite.
 
+## Cover art
+
+Extracted once per album, resized, cached on disk under `<userData>/artcache/`, and
+handed to the renderer as a URL.
+
+It used to be a base64 data URL, which meant the same unresized image existed three
+times: as a ~1.37×-inflated string in a main-process Map that was never pruned, as
+that same string again in a renderer Map after being structured-cloned across IPC, and
+as a decoded bitmap in Chromium. A 3 MB embedded JPEG cost roughly 10 MB of process
+memory per album, permanently. Now the renderer holds an ~80-character string and the
+bytes sit on disk at 4 KB (96px) and 46 KB (512px).
+
+Resizing uses Electron's own `nativeImage` rather than sharp or jimp, because this
+project's packaging has no native-rebuild step. It is main-thread and ~10 ms per
+image, so extraction runs through a concurrency-1 queue, on demand only, never as a
+boot sweep. The cache is content-addressed, so replacing a cover produces a new URL
+rather than being masked by a stale one — which is what lets the server mark art
+`immutable`. It is LRU-pruned to 128 MB and an album's files are deleted when the
+album is removed.
+
+Small tiles ask for the 96px variant explicitly, because Chromium keeps a decoded
+bitmap per distinct URL: a 512px image in a 48px tile is ~1 MB of bitmap for nothing.
+With nothing needing `data:` URLs any more, `img-src` no longer allows them.
+
 ## Which torrents are live
 
 `main/torrent-manager.js` owns lifecycle: which albums have a WebTorrent object at

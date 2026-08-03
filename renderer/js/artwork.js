@@ -15,9 +15,20 @@
   var PREFERRED = ['cover', 'folder', 'front', 'album', 'artwork', 'art'];
 
   var resolved = new Map(); // torrentId -> url | null  (image file inside the torrent)
-  var embedded = new Map(); // torrentId -> url | null  (art read out of the audio tags)
+  var embedded = new Map(); // torrentId -> hero url | null  (from the art cache)
+  var thumbs = new Map(); // torrentId -> 96px url, for small tiles
   var inFlight = new Set();
   var watchers = new Map(); // torrentId -> [{tile, index}] to repaint on arrival
+
+  /**
+   * Retry budget for the 'pending' status.
+   *
+   * 'pending' means nothing readable has downloaded yet, so it is worth asking again —
+   * but not forever. Without a bound, an album that never completes would have its
+   * tiles re-asking main on every repaint for the life of the window.
+   */
+  var MAX_PENDING_ASKS = 12;
+  var pendingAsks = new Map(); // torrentId -> count
 
   function pickCover(torrent) {
     var files = torrent && torrent.files;
@@ -72,10 +83,14 @@
   }
 
   /**
-   * Many releases ship no image file and carry the art in the audio tags —
-   * that's what Finder shows. Reading tags needs the filesystem, so it happens
-   * in the main process; the result is cached and the tiles repaint when it
-   * lands.
+   * Art from the main process's cache: a real image file in the album folder, or
+   * failing that the picture embedded in the audio tags.
+   *
+   * What comes back is a URL into the local file server, not image data. It used to
+   * be a base64 data URL, which meant this Map held a full copy of every cover for
+   * the life of the window — on top of the copy in the main process and the decoded
+   * bitmap in Chromium. Now these are ~80-character strings and the bytes live on
+   * disk, resized.
    */
   function requestEmbedded(torrentId) {
     if (embedded.has(torrentId) || inFlight.has(torrentId)) return;
@@ -86,16 +101,25 @@
         inFlight.delete(torrentId);
         var status = result && result.status;
 
-        // Only 'none' is terminal. 'pending' means nothing has finished
-        // downloading yet, so leaving the key unset is what allows a later tick
-        // to retry — the previous version could not tell the two apart and
-        // cached "no art" forever for any torrent that was still downloading
-        // when its tile first rendered, which was all of them.
+        // Only 'none' is terminal. 'pending' means nothing readable has downloaded
+        // yet, so leaving the key unset is what allows a later tick to retry — the
+        // previous version could not tell the two apart and cached "no art" forever
+        // for any torrent that was still downloading when its tile first rendered,
+        // which was all of them.
         if (status === 'none') {
           embedded.set(torrentId, null);
+          pendingAsks.delete(torrentId);
         } else if (status === 'ok' && result.url) {
           embedded.set(torrentId, result.url);
+          if (result.thumbUrl) thumbs.set(torrentId, result.thumbUrl);
+          pendingAsks.delete(torrentId);
           repaint(torrentId);
+        } else {
+          // Still pending. Give up after a bounded number of tries so a permanently
+          // incomplete album cannot keep asking for the life of the window.
+          var asks = (pendingAsks.get(torrentId) || 0) + 1;
+          pendingAsks.set(torrentId, asks);
+          if (asks >= MAX_PENDING_ASKS) embedded.set(torrentId, null);
         }
       })
       .catch(function () {
@@ -110,31 +134,56 @@
     list.forEach(function (entry) {
       // Force a re-evaluation past the idempotency guard.
       entry.tile.dataset.artState = '';
-      apply(entry.tile, MP.store.getTorrent(torrentId), entry.index);
+      apply(entry.tile, MP.store.getTorrent(torrentId), entry.index, { thumb: entry.thumb });
     });
   }
 
-  function watch(torrentId, tile, index) {
+  function watch(torrentId, tile, index, wantThumb) {
     if (!watchers.has(torrentId)) watchers.set(torrentId, []);
     var list = watchers.get(torrentId);
     if (!list.some(function (e) { return e.tile === tile; })) {
-      list.push({ tile: tile, index: index });
+      list.push({ tile: tile, index: index, thumb: !!wantThumb });
     }
   }
 
-  function coverUrl(torrent) {
+  /**
+   * The cover to show for an album.
+   *
+   * Prefers the main process's cache, which is a resized JPEG — a 96px thumb decodes
+   * to ~36 KB where the album's own cover file is routinely 1-3 MB and decodes to
+   * many times that. Chromium holds a decoded bitmap per distinct image URL, so
+   * pointing tiles at full-size covers was a real cost even once the bytes stopped
+   * being copied through JS.
+   *
+   * The raw file inside the album is used as an immediate stand-in while the cache is
+   * still being built, so a cold library still shows art straight away rather than
+   * blank tiles. `repaint()` swaps in the resized version when it lands.
+   */
+  function coverUrl(torrent, wantThumb) {
     if (!torrent) return null;
-    var fromFile = coverFileUrl(torrent);
-    if (fromFile) return fromFile;
-    if (embedded.has(torrent.id)) return embedded.get(torrent.id);
+
+    if (embedded.has(torrent.id)) {
+      var cached = embedded.get(torrent.id);
+      if (cached) {
+        // Chromium keeps a decoded bitmap per distinct URL, so a small tile asking for
+        // the 512px version costs ~1 MB of bitmap where the 96px one costs ~36 KB.
+        var thumb = thumbs.get(torrent.id);
+        return wantThumb && thumb ? thumb : cached;
+      }
+      // null means the cache looked and found nothing; the album's own image file, if
+      // it has one, is then the only option.
+      return coverFileUrl(torrent);
+    }
+
     requestEmbedded(torrent.id);
-    return null;
+    return coverFileUrl(torrent);
   }
 
   function forget(torrentId) {
     resolved.delete(torrentId);
     embedded.delete(torrentId);
     watchers.delete(torrentId);
+    pendingAsks.delete(torrentId);
   }
 
   /** URL for one specific image file, once it has fully downloaded. */
@@ -155,11 +204,20 @@
    *
    * @param {number} [index] render this specific image instead of the cover
    */
-  function apply(tile, torrent, index) {
+  /**
+   * @param {object=} opts
+   * @param {boolean=} opts.thumb  Ask for the 96px variant. Set by callers whose tile
+   *   is small — the transport's now-playing art — so it does not pay for a 512px
+   *   decode it cannot show.
+   */
+  function apply(tile, torrent, index, opts) {
     if (!tile) return;
+    var wantThumb = !!(opts && opts.thumb);
     var id = torrent ? torrent.id : '';
-    var url = torrent ? (index != null ? fileUrl(torrent, index) : coverUrl(torrent)) : null;
-    if (torrent) watch(id, tile, index);
+    var url = torrent
+      ? (index != null ? fileUrl(torrent, index) : coverUrl(torrent, wantThumb))
+      : null;
+    if (torrent) watch(id, tile, index, wantThumb);
     var stateKey = id + '|' + (index != null ? index : 'cover') + '|' + (url || '');
     if (tile.dataset.artState === stateKey) return;
     tile.dataset.artState = stateKey;

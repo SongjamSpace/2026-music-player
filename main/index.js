@@ -1,4 +1,6 @@
-const { app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, session, shell } = require('electron');
+const {
+  app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, nativeImage, session, shell,
+} = require('electron');
 const fs = require('fs');
 // Async FS for anything that touches the download root: it lives on an external
 // drive, and a sync call against a spun-down disk blocks the wire protocol.
@@ -22,6 +24,7 @@ const { createFileServer } = require('./file-server');
 const { createLibrary } = require('./library');
 const { importFromMagnets } = require('./library-import');
 const { createTorrentManager } = require('./torrent-manager');
+const { createArtwork } = require('./artwork');
 const nat = require('./nat');
 const netPath = require('./net-path');
 const swarmProbe = require('./swarm-probe');
@@ -237,6 +240,18 @@ const torrentService = new TorrentService();
 const library = createLibrary({ dir: path.join(app.getPath('userData'), 'library') });
 
 /**
+ * Cover art, resized onto disk and served by URL.
+ *
+ * `nativeImage` and `parseFile` are injected rather than required inside the module,
+ * so the resizing and tag-reading dependencies stay visible from here.
+ */
+const artwork = createArtwork({
+  dir: path.join(app.getPath('userData'), 'artcache'),
+  nativeImage,
+  parseFile: (file, opts) => mm.parseFile(file, opts),
+});
+
+/**
  * Serves media and artwork that is already on disk, bypassing webtorrent.
  *
  * Path resolution is injected rather than imported so the server has no
@@ -263,6 +278,9 @@ const fileServer = createFileServer({
     if (!track || !track.verified) return null;
     return { root: record.root, relPath: track.path };
   },
+
+  /** Resized covers out of the art cache — see main/artwork.js. */
+  resolveArt: (albumId, variant) => artwork.pathFor(albumId, variant),
 });
 
 const piecePolicy = createPiecePolicy({
@@ -665,6 +683,13 @@ app.whenReady().then(async () => {
   // Before the window, so the first thing the renderer asks for is already warm.
   // Cheap enough to justify blocking: measured at 1,000 albums / 10,000 tracks the
   // whole index is 1.2 MB and loads in ~5ms.
+  try {
+    await artwork.load();
+  } catch (err) {
+    // A missing or unreadable manifest just means re-extracting on demand.
+    console.warn('[artwork] could not load cache manifest:', err.message);
+  }
+
   try {
     await library.load();
     // Only when the drive is actually there. Importing against a missing root would
@@ -1089,71 +1114,61 @@ ipcMain.handle('get-library-tracks', (event, albumId) => {
   };
 });
 
-// -- embedded artwork ------------------------------------------------------
+// -- cover art -------------------------------------------------------------
 //
-// Plenty of releases ship no cover.jpg at all and carry the art in the audio
-// tags instead — that's what Finder and Music.app are reading.
+// Extracted once, resized, cached on disk and handed to the renderer as a URL. See
+// main/artwork.js for why: the previous version shipped base64 data URLs, so the same
+// unresized image existed as an inflated string here, again in the renderer, and
+// again as a decoded bitmap in Chromium — roughly 10 MB per album, permanently.
 //
-// The reply is an explicit status rather than a nullable value, because the two
-// "no art right now" cases are not the same and conflating them was a real bug:
-// this handler returned `null` both for "nothing has finished downloading yet,
-// ask again" and for "parsed a complete file and there is genuinely no art,
-// stop asking", while the renderer treated `null` as terminal. Art therefore
-// never appeared for any torrent that was still incomplete the first time a tile
-// asked for it — which is every torrent, since tiles render immediately.
+// The reply is an explicit status, not a nullable URL, because the two "no art right
+// now" cases are different and conflating them was a real bug: `null` meant both
+// "nothing has finished downloading yet, ask again" and "looked, and there is no art,
+// stop asking", while the renderer treated it as terminal. Art therefore never
+// appeared for any album still downloading when its tile first rendered.
 //
-//   pending  nothing complete to read yet; ask again later
-//   none     parsed and there is no embedded art; terminal
-//   ok       `url` is a data URL of the picture
-const ART_STATUS = { pending: 'pending', none: 'none', ok: 'ok' };
+//   pending  nothing readable yet; ask again later
+//   none     looked, and there is no art; terminal
+//   ok       `url` points at the cached file
 
 /**
- * Bounded because it holds base64 image data — roughly 1.37x the JPEG per entry,
- * and a 3 MB cover is not unusual. It previously grew for the life of the process
- * and was not even cleared when a torrent was removed. Phase 6 replaces the data
- * URLs with resized files on disk served by URL; until then, cap the count.
+ * Where an album's images and complete audio files are, for extraction.
+ *
+ * Uses the index rather than a live torrent, so art works for archived albums — which
+ * after the lifecycle manager is most of the library.
  */
-const ART_CACHE_MAX = 32;
-const albumArtCache = new Map();
-
-function cacheArt(torrentId, value) {
-  // Insertion-ordered, so the oldest key is the first — a good-enough LRU for a
-  // cache this small, and cheaper than tracking access times.
-  if (albumArtCache.size >= ART_CACHE_MAX && !albumArtCache.has(torrentId)) {
-    albumArtCache.delete(albumArtCache.keys().next().value);
+function artSourcesFor(albumId) {
+  const record = library.get(albumId);
+  if (!record || !record.root) {
+    // No index record yet, but possibly a live torrent — a magnet added moments ago.
+    const audioPaths = torrentService.getCompleteAudioPaths(albumId, 3);
+    return { id: albumId, imagePaths: [], audioPaths };
   }
-  albumArtCache.set(torrentId, value);
-  return value;
+
+  const imagePaths = [];
+  const audioPaths = [];
+  for (const track of record.tracks) {
+    if (!track.verified) continue;
+    const abs = path.join(record.root, track.path);
+    if (IMAGE_ART_RE.test(track.name)) imagePaths.push(abs);
+    else if (AUDIO_RE.test(track.name) && audioPaths.length < 3) audioPaths.push(abs);
+  }
+  return { id: albumId, imagePaths, audioPaths };
 }
 
-ipcMain.handle('get-album-art', async (event, torrentId) => {
-  if (albumArtCache.has(torrentId)) return albumArtCache.get(torrentId);
+const IMAGE_ART_RE = /\.(jpg|jpeg|png|webp|gif|avif|bmp)$/i;
 
-  const candidates = torrentService.getCompleteAudioPaths(torrentId, 3);
-  // Deliberately not cached: this is the retryable case.
-  if (!candidates.length) return { status: ART_STATUS.pending };
+ipcMain.handle('get-album-art', async (event, albumId) => {
+  const result = await artwork.get(artSourcesFor(albumId));
+  if (result.status !== 'ok') return { status: result.status };
 
-  for (const file of candidates) {
-    try {
-      const meta = await mm.parseFile(file, { duration: false, skipPostHeaders: true });
-      const picture = (meta.common.picture || [])[0];
-      if (picture && picture.data && picture.data.length) {
-        const url =
-          'data:' + (picture.format || 'image/jpeg') + ';base64,' +
-          Buffer.from(picture.data).toString('base64');
-        return cacheArt(torrentId, {
-          status: ART_STATUS.ok,
-          url,
-          artist: meta.common.artist || null,
-          album: meta.common.album || null,
-        });
-      }
-    } catch (err) {
-      console.warn('[art] could not read tags from', path.basename(file), '-', err.message);
-    }
-  }
-
-  return cacheArt(torrentId, { status: ART_STATUS.none });
+  // Version in the URL, so replacing a cover busts the cache rather than being
+  // masked by it — which is what lets the server mark art immutable.
+  return {
+    status: 'ok',
+    url: fileServer.artUrl(albumId, 'hero', result.version),
+    thumbUrl: fileServer.artUrl(albumId, 'thumb', result.version),
+  };
 });
 
 // -- library root safety ---------------------------------------------------
@@ -1376,7 +1391,7 @@ ipcMain.handle('remove-torrent', async (event, torrentId, destroyStore) => {
   // Everything else in this process keyed by torrent id. None of this was being
   // released: removing an album left its artwork, its debounce timers and its
   // piece-policy memos behind for the life of the session.
-  albumArtCache.delete(torrentId);
+  await artwork.forget(torrentId);
   clearTimeout(priorityTimers.get(torrentId));
   priorityTimers.delete(torrentId);
   priorityLast.delete(torrentId);
@@ -1581,6 +1596,7 @@ ipcMain.handle('get-metrics', () => {
     // overhaul is about: does cost track what is *active*, or how much music has
     // ever been added?
     library: library.stats(),
+    artwork: artwork.stats(),
     processes: processes,
   };
 });

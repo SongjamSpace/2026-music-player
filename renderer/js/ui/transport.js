@@ -41,7 +41,9 @@
     var ordinal = t.files.slice(0, p.fileIndex + 1).filter(MP.util.isPlayable).length;
     posEl.textContent = playable ? 'Track ' + ordinal + ' of ' + playable : '';
 
-    MP.artwork.apply(artEl, t);
+    // The transport's art is a small tile, so take the 96px variant rather than
+    // paying for a 512px decode it cannot show.
+    MP.artwork.apply(artEl, t, null, { thumb: true });
     scrubber.disabled = false;
     btnFullscreen.hidden = !MP.util.isVideoFile(file);
 
@@ -49,7 +51,7 @@
     // torrent's progress until it does. Swapped on every track change.
     if (unsubArtwork) unsubArtwork();
     unsubArtwork = MP.store.subscribe('torrent:progress:' + t.id, function (live) {
-      MP.artwork.apply(artEl, live);
+      MP.artwork.apply(artEl, live, null, { thumb: true });
     });
   }
 
