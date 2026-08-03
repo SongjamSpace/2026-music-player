@@ -117,10 +117,16 @@ Media keys and the macOS Now Playing widget work via `navigator.mediaSession`.
 ## Tech
 
 - **Electron** – desktop shell
-- **WebTorrent** – torrent client and HTTP streaming server (range requests for seeking)
-- **electron-store** – persists magnet URIs, download path, and a `prefs` object
-  (theme, volume, shuffle/repeat, learned track durations, listen port, upload
-  limit, piece strategy)
+- **WebTorrent** – torrent client, and the HTTP streaming server used for content
+  that is still downloading
+- **`main/file-server.js`** – one long-lived loopback server for files already
+  complete on disk, so a downloaded album plays without going through WebTorrent's
+  piece store at all (see [Playing from disk](#playing-from-disk))
+- **`main/library.js`** – the persistent album index, an append-only JSONL log under
+  `<userData>/library/` (see [The library index](#the-library-index))
+- **electron-store** – persists magnet URIs, download path, the library-root marker
+  id, and a `prefs` object (theme, volume, shuffle/repeat, learned track durations,
+  listen port, upload limit, piece strategy)
 - **@silentbot1/nat-api** – UPnP-IGD / NAT-PMP port mapping. ESM-only, so it is
   reached through a dynamic `import()` from CommonJS main; this is also why the
   packaged build sets `asar: false` (Electron 28 can't dynamic-import ESM from
@@ -152,6 +158,65 @@ albums spends minutes saturating the same thread the downloader runs on, right
 when you want to press play. With them, an untouched file set is trusted after
 one `stat()` per file. (Not `skipVerify`, which trusts the disk blindly and
 would happily serve a truncated file as valid audio.)
+
+Note the limit: `fileModtimes` is **all-or-nothing**. WebTorrent requires a modtime
+for every file (`lib/torrent.js` uses `.every()`), so a *partially* downloaded
+torrent can never benefit from the cache no matter what is written — which is why
+these are only recorded on completion. A library with three partial albums therefore
+re-hashes those three in full on every launch, and the only real fix is not to add
+them at boot.
+
+## The library index
+
+`<userData>/library/` holds an append-only JSONL log of one record per album: its
+name, the files it contains, which of them are present on disk, and its state
+(`downloading` / `seeding` / `idle` / `archived` / `missing`).
+
+It exists because until it did, *the library was the set of live WebTorrent
+objects*. There was nowhere else a file list could come from, so every album had to
+be a running torrent just to be listed — and piece caches, wires, bitfields and
+per-torrent HTTP servers all scale off that set. An index the UI can read without a
+torrent being alive is the precondition for not keeping them all alive.
+
+Append-only rather than one JSON blob, and deliberately not in electron-store:
+`Store.set()` serialises and rewrites the whole file synchronously, and that file
+also holds `prefs.durations`, which is written every time a track duration is
+learned. An append is a few hundred bytes; a torn final line from a crash mid-write
+is discarded and repaired on load. The log is compacted into `albums.snapshot` once
+it outgrows the records it contains.
+
+The index is rebuilt from nothing by `main/library-import.js`, using the cached
+`.torrent` files plus one `stat()` per file — no network, no peers, no piece
+verification. Measured on the real library that is 11 albums and 1,070 tracks in
+~0.5 s. At the design target of 1,000 albums / 10,000 tracks the whole index is
+1.2 MB and loads in ~5 ms, which is what makes holding it in memory the right call
+rather than reaching for SQLite.
+
+## Playing from disk
+
+A file that is already complete is read directly, by a single long-lived HTTP server
+on `127.0.0.1` (`main/file-server.js`), instead of being streamed through
+WebTorrent's per-torrent server. Only content that is still downloading goes through
+the torrent path.
+
+Loopback HTTP rather than a custom `mp://` protocol, for three specific reasons: the
+CSP in `renderer/index.html` already allows `media-src http://127.0.0.1:*`, so
+nothing there has to change; `installStreamCorsHeaders()` already pins
+`Access-Control-Allow-Origin` onto loopback responses, which the DSP graph depends on
+because the renderer's origin over `file://` is the string `"null"`; and
+`fs.createReadStream({start, end})` is the well-trodden way to serve the HTTP 206
+Chromium needs to seek inside a FLAC.
+
+Because it listens on loopback, every path carries a session token regenerated each
+launch — the loopback interface is not a permission boundary, and without one any
+local process could enumerate the library by walking `/media/<id>/0`. Resolved paths
+are `realpath`-checked against the album root, since `..` in a torrent's file paths
+is a known bad-torrent trick.
+
+The bar for serving a file locally is *known* complete, never "probably": a local URL
+for a partially written file would play silence or noise. `torrent.done` is O(1) and
+covers a finished album; individual files fall back to the memo the progress ticker
+already maintains.
 
 ## Download speed
 
@@ -194,7 +259,15 @@ defaults are conservative in ways that cost real throughput.
   into every add and refreshed daily from `ngosang/trackerslist`, cached to
   `<userData>/trackers.txt` so it works offline. `ws://` trackers are excluded:
   they return only WebRTC peers, which a Node client can't dial.
-- **`maxConns: 120`** per torrent, up from WebTorrent's 55.
+- **`maxConns: 60`** per torrent, up from WebTorrent's 55. It was 120; each wire
+  carries its own read/write buffers and a bitfield, and that cost multiplies by the
+  number of live torrents.
+- **A per-torrent piece-cache budget** rather than a flat slot count
+  (`main/tuning.js`). `storeCacheSlots` looks like a harmless integer and is not: it
+  is the size of an LRU of *whole pieces*, so a flat 64 slots charged a 4 MB-piece
+  torrent 256 MB and a 256 KB-piece one 16 MB — a 16× spread nobody chose. Budgeting
+  bytes instead took the predicted worst case across the real library from 552 MB to
+  108 MB. `npm run check` fails if that budget regresses.
 - **A default upload cap of 1.5 MB/s**, which sounds backwards but isn't — a
   saturated uplink queues the TCP acknowledgements your *downloads* depend on.
   Configurable in Settings. Never set it to zero: peers reciprocate.
@@ -206,6 +279,18 @@ defaults are conservative in ways that cost real throughput.
   head is exposed, rarest-first once there's runway, with a wide hysteresis band
   so it can't flap. Rarest-first is what earns unchokes; sequential is what
   avoids stalls.
+
+  With one hard limit on top: **rarest-first is only applied to torrents small
+  enough that WebTorrent's rarity scan is cheap.** `rarity-map.getRarestPiece()`
+  scans every piece in the torrent per call, `trySelectWire()` calls it in a loop
+  over the whole selection span, the filter it passes loops every wire, and
+  `_update()` runs all of that per wire from eight separate wire events. On a
+  5,847-piece discography a V8 CPU profile attributed ~14% of wall clock — ~85% of
+  all non-idle JS — to that one path, with event-loop stalls over a second. It also
+  grew native memory ~15 MB/min, because the picker kept starting pieces it never
+  finished and each holds 16 KB block buffers. Bounding it took the main process from
+  49% of a core to 6%, and max event-loop lag from 1386 ms to 3 ms, at the same
+  download speed.
 - **A 30-second readahead window** around the play head, replacing WebTorrent's
   two-piece one. The critical set is garbage-collected on every tick, which the
   library itself never does — left alone it grows for the life of the torrent
@@ -337,9 +422,35 @@ node scripts/net-path-check.js --encryption 90   # measure it against a real swa
 ### Measuring it
 
 ```bash
+npm run check                # every no-network, no-running-app harness
+npm run mem                  # footprint + swap, per process
+node scripts/mem-check.js --cpu 60   # average CPU over a real window
+npm run check:library        # index vs. the actual drive (needs it mounted)
+
+npm run dev:debug            # then, against the running app:
+npm run playback             #   does a downloaded album really play from disk?
+node scripts/cpu-profile.js 25       # V8 profile of the main process
+
 node scripts/net-probe.js --torrent ubuntu --profile tuned    # or baseline
-node scripts/selection-check.js                               # regression check
 ```
+
+Two notes on measuring this app specifically, both learned the hard way:
+
+**Never use `ps -o rss`.** macOS compresses and swaps, so a process with a 1.93 GB
+footprint reported ~160 MB of RSS — which is why a memory problem this large looked
+like a small one for a long time. `mem-check.js` reads `top`'s footprint and
+`vmmap`'s swapped-out figure instead, and reports the swap number explicitly,
+because pages being compressed is what actually produces the beachball.
+
+**Never quote a single CPU sample.** Two `top` samples of the same process a second
+apart measured 52% and 1.5%; the work arrives in bursts of piece verification and
+wire encryption. `--cpu N` accumulates CPU-seconds over a fixed wall-clock window,
+which is the only number worth comparing between builds.
+
+`sample(1)` is also not enough to find a hot spot here: every hot frame is
+JIT-compiled JavaScript, so it symbolises as a bare address and tells you only "it's
+in JS". `cpu-profile.js` attaches the V8 profiler over the inspector and names the
+function and line — which is how the rarest-first picker was found.
 
 `net-probe` reports bytes verified to disk over a fixed window after a warmup.
 Don't tune against `torrent.downloadSpeed` — it is a five-second trailing
@@ -354,6 +465,21 @@ invisible: `file.select(1)` paired with a `file.deselect()` hardcoded to
 priority 0 never matched, so every play, seek and shuffle appended another
 permanent entry to an array that gets re-sorted on every piece update. Two
 hundred track changes left 533 selections behind; the fix holds at 3.
+
+The other harnesses guard things that are equally invisible until they aren't:
+
+- `library-cost-check` prices the piece caches against the real `.torrent` files and
+  **fails the build over a budget**, because `storeCacheSlots` is an integer whose
+  real cost you cannot see without knowing your own piece lengths. It also
+  cross-checks the fast bencode piece-length reader against `parse-torrent`.
+- `library-root-check` is the decision table for the unmounted-drive guard — the one
+  failure that would otherwise re-download the entire library.
+- `range-check` boots the file server against a fixture and asserts byte-exactness,
+  inclusive `Content-Range`, 416, `HEAD`, path traversal and descriptor leaks. An
+  off-by-one there means audio that plays but cannot seek, which reads as a UI bug.
+- `library-check` covers the index's failure modes: a torn final line from a crash
+  mid-append, an interrupted compaction, a resurrected deletion, and load time at
+  1,000 albums.
 
 ## Renderer architecture
 

@@ -111,6 +111,15 @@ class TorrentService {
     // quiet" and "nothing will ever download again until you restart".
     this.clientError = null;
     this.onClientError = null;
+
+    /**
+     * `(publicId) => void`, called once when an album finishes verifying.
+     *
+     * Set by main/index.js to record completion in the library index. A callback
+     * rather than an event because there is exactly one owner of durable state and
+     * making that explicit is worth more than the flexibility.
+     */
+    this.onTorrentComplete = null;
   }
 
   // -- metadata cache ------------------------------------------------------
@@ -349,13 +358,27 @@ class TorrentService {
   }
 
   /**
-   * The infohash webtorrent actually knows this torrent by, which differs from
-   * the library id whenever the album was seeded from disk. Needed by callers
-   * that key their own state on the real hash and have to clean it up *after*
-   * removal has already discarded the alias.
+   * The infohash webtorrent actually knows this torrent by.
+   *
+   * Always returns a usable hash, falling back to the library id — which is correct
+   * for the common case, where they are the same. Callers that clean up state keyed
+   * on the real hash need this *after* removal has discarded the alias.
    */
   realInfoHash(publicId) {
     return this.aliases.get(publicId) || String(publicId || '').toLowerCase() || null;
+  }
+
+  /**
+   * The real infohash only when it actually differs from the library id.
+   *
+   * For the index, where "we have an alias" is the meaningful fact — it means the
+   * album was re-hashed from the user's own files and the swarm knows it under a
+   * different hash. Returning the id itself here would record every album as
+   * aliased and make the field useless.
+   */
+  aliasInfoHash(publicId) {
+    const real = this.aliases.get(publicId);
+    return real && real !== String(publicId || '').toLowerCase() ? real : null;
   }
 
   /**
@@ -583,8 +606,19 @@ class TorrentService {
       this._startTicker();
 
       // Persist modtimes so the next launch can skip re-hashing this torrent.
+      // Note the modtimes cache is all-or-nothing in webtorrent
+      // (lib/torrent.js:551-566 uses `.every()`), so a partial torrent can never
+      // benefit from it — which is why they are only written on completion.
       if (t.done) this._writeCachedModtimes(t, publicId);
       else t.once('done', () => this._writeCachedModtimes(t, publicId));
+
+      // One notification when an album finishes, for whoever owns durable state.
+      // Fires for an already-complete torrent too, because a restored torrent can
+      // verify before this callback runs and would then never emit 'done'.
+      if (typeof this.onTorrentComplete === 'function') {
+        if (t.done) this.onTorrentComplete(publicId);
+        else t.once('done', () => this.onTorrentComplete(publicId));
+      }
     });
   }
 
@@ -736,6 +770,37 @@ class TorrentService {
         fileProgress: isActive ? this._fileProgressFor(publicId, torrent) : null,
       };
     });
+  }
+
+  /**
+   * Plain file list for a live torrent: name, path and length only.
+   *
+   * For the library index, which wants the shape of the album rather than anything
+   * transient. Deliberately no progress and no URLs — the first is the O(all pieces)
+   * walk this class works hard to avoid, and the second belongs to whoever is
+   * serving, not to the index.
+   *
+   * @returns {Array<{name: string, path: string, length: number}>}
+   */
+  getTorrentFiles(torrentId) {
+    const t = this._get(torrentId);
+    if (!t || !t.files) return [];
+    return t.files.map((f) => ({ name: f.name, path: f.path, length: f.length }));
+  }
+
+  /** Torrent-level facts for the index. All O(1). */
+  getTorrentMeta(torrentId) {
+    const t = this._get(torrentId);
+    if (!t) return null;
+    return {
+      name: t.name || null,
+      magnetURI: t.magnetURI || null,
+      length: t.length || 0,
+      pieceLength: t.pieceLength || 0,
+      numPieces: (t.pieces && t.pieces.length) || 0,
+      done: !!t.done,
+      infoHash: t.infoHash || null,
+    };
   }
 
   /**

@@ -21,6 +21,12 @@ contextBridge.exposeInMainWorld('playerAPI', {
 
   addTorrent: (magnetUri) => ipcRenderer.invoke('add-torrent', magnetUri),
   getTorrents: () => ipcRenderer.invoke('get-torrents'),
+
+  // The library as recorded on disk, independent of any live torrent. Headers only;
+  // track lists are fetched per album, because the full index is megabytes and the
+  // UI only ever shows one album's tracks at a time.
+  getLibrary: () => ipcRenderer.invoke('get-library'),
+  getLibraryTracks: (albumId) => ipcRenderer.invoke('get-library-tracks', albumId),
   removeTorrent: (torrentId, destroyStore) =>
     ipcRenderer.invoke('remove-torrent', torrentId, destroyStore),
 

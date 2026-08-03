@@ -19,6 +19,8 @@ const {
 const { createTrackers } = require('./trackers');
 const { createPiecePolicy } = require('./piece-policy');
 const { createFileServer } = require('./file-server');
+const { createLibrary } = require('./library');
+const { importFromMagnets } = require('./library-import');
 const nat = require('./nat');
 const netPath = require('./net-path');
 const swarmProbe = require('./swarm-probe');
@@ -223,6 +225,15 @@ function rotateCrashLog() {
 
 const store = new Store();
 const torrentService = new TorrentService();
+
+/**
+ * The persistent album index.
+ *
+ * Its own directory, not electron-store: see the note in main/library.js about
+ * Store.set() rewriting the whole file synchronously, which this app already does
+ * once per learned duration.
+ */
+const library = createLibrary({ dir: path.join(app.getPath('userData'), 'library') });
 
 /**
  * Serves media and artwork that is already on disk, bypassing webtorrent.
@@ -570,6 +581,14 @@ app.whenReady().then(async () => {
     trackers,
   });
 
+  // Completion is the point at which webtorrent has verified every piece, so it is
+  // the only moment the index can honestly mark tracks verified.
+  torrentService.onTorrentComplete = (publicId) => {
+    indexFromLiveTorrent(publicId).catch((err) =>
+      console.warn('[library] could not record completion for', publicId, '-', err.message)
+    );
+  };
+
   // A destroyed client is unrecoverable in place, so say so plainly rather than
   // letting the user watch 0 B/s and conclude the swarms are dead.
   torrentService.onClientError = (info) => {
@@ -606,20 +625,57 @@ app.whenReady().then(async () => {
   piecePolicy.start();
 
   const savedPath = store.get('downloadPath');
-  const library = checkLibraryRoot(savedPath);
-  if (savedPath && library.ok) {
+  // Named for what it checks — the *root directory* — not `library`, which is the
+  // index itself and lives at module scope.
+  const libraryRoot = checkLibraryRoot(savedPath);
+  if (savedPath && libraryRoot.ok) {
     torrentService.setDownloadPath(savedPath);
+  }
+
+  const savedMagnets = store.get('magnets', []);
+
+  // Before the window, so the first thing the renderer asks for is already warm.
+  // Cheap enough to justify blocking: measured at 1,000 albums / 10,000 tracks the
+  // whole index is 1.2 MB and loads in ~5ms.
+  try {
+    await library.load();
+    // Only when the drive is actually there. Importing against a missing root would
+    // stat every track as absent and record the entire library as empty — which is
+    // the same class of mistake as letting webtorrent re-download it.
+    if (libraryRoot.ok && library.size < savedMagnets.length) {
+      // Reconstructs records from the cached .torrent files plus a stat per file —
+      // no network, no peers, no piece verification. Additive and idempotent, so it
+      // is safe on every launch and safe to re-run after a partial failure.
+      const imported = await importFromMagnets({
+        library,
+        magnets: savedMagnets,
+        cacheDir: path.join(app.getPath('userData'), 'torrents'),
+        downloadRoot: torrentService.getDownloadPath(),
+        now: new Date().toISOString(),
+      });
+      if (imported.added) {
+        console.log('[library] imported ' + imported.added + ' album(s) into the index');
+      }
+      if (imported.unresolved.length) {
+        console.log(
+          '[library] ' + imported.unresolved.length +
+            ' magnet(s) have no cached metadata yet — they import once a peer supplies it'
+        );
+      }
+    }
+  } catch (err) {
+    // The index is additive at this point: the app still works from live torrents
+    // without it, so a failure here must not stop the window opening.
+    recordError('library index', err);
   }
 
   buildMenu();
   createWindow();
-
-  const savedMagnets = store.get('magnets', []);
   if (mainWindow) {
     mainWindow.webContents.once('did-finish-load', () => {
       // The library warning goes first: if the drive is missing, the renderer must
       // know before it starts rendering torrents that will all read as 0%.
-      if (!library.ok) send('library-unavailable', library);
+      if (!libraryRoot.ok) send('library-unavailable', libraryRoot);
       else if (savedMagnets.length > 0) send('restore-magnets', savedMagnets);
     });
   }
@@ -655,6 +711,13 @@ async function shutdown() {
   } catch (err) {
     console.warn('[shutdown] file server:', err.message);
   }
+  // Index writes are queued, so a record upserted moments before quit could still
+  // be in flight. Its own try, for the same reason as above.
+  try {
+    await library.flush();
+  } catch (err) {
+    console.warn('[shutdown] library flush:', err.message);
+  }
   // Last thing, and only on the path that ran teardown: the absence of this
   // file is the entire signal that the previous session exited cleanly.
   clearSessionFlag();
@@ -679,6 +742,72 @@ app.on('window-all-closed', () => {
   app.quit();
 });
 
+// -- keeping the index current ---------------------------------------------
+//
+// The index has to agree with what is on disk without being the thing that reads
+// the disk on every tick. Two write points are enough:
+//
+//   1. metadata arrives — we finally know the file list, so the record can exist
+//   2. the torrent finishes — every track is verified by webtorrent itself
+//
+// Nothing writes per progress tick. A record that says `partial` while the download
+// runs is correct, and the next launch's import re-stats anyway.
+
+/**
+ * Write (or refresh) an album record from a live torrent.
+ *
+ * Preferred over the cached-.torrent import when a torrent is live, because it also
+ * captures `realInfoHash` — the hash webtorrent actually knows the album by, which
+ * differs from the library id whenever the album was seeded from disk. Once boot
+ * stops adding torrents, the index is the only place that mapping can come from.
+ */
+async function indexFromLiveTorrent(publicId, magnetUri) {
+  const files = torrentService.getTorrentFiles(publicId);
+  if (!files || !files.length) return;
+  const root = torrentService.getTorrentPath(publicId);
+  const meta = torrentService.getTorrentMeta(publicId);
+  const existing = library.get(publicId);
+
+  const complete = !!(meta && meta.done);
+  const tracks = files.map((f, i) => {
+    const prior = existing && existing.tracks[i];
+    return {
+      i: i,
+      path: f.path,
+      name: f.name,
+      length: f.length,
+      // Sticky: a file webtorrent has verified once does not become unverified
+      // because a later snapshot was taken mid-download.
+      verified: complete || !!(prior && prior.verified),
+      mtimeMs: prior ? prior.mtimeMs : null,
+      dur: prior ? prior.dur : null,
+    };
+  });
+
+  await library.upsert({
+    id: publicId,
+    // Only when it really differs from the id — see aliasInfoHash.
+    realInfoHash: torrentService.aliasInfoHash(publicId) || (existing && existing.realInfoHash) || null,
+    magnetURI: magnetUri || (existing && existing.magnetURI) || (meta && meta.magnetURI) || null,
+    name: (meta && meta.name) || (existing && existing.name) || publicId,
+    root: root || (existing && existing.root) || null,
+    state: complete ? 'seeding' : 'downloading',
+    totalBytes: (meta && meta.length) || tracks.reduce((n, t) => n + t.length, 0),
+    presentBytes: complete
+      ? tracks.reduce((n, t) => n + t.length, 0)
+      : (existing && existing.presentBytes) || 0,
+    pieceLength: (meta && meta.pieceLength) || (existing && existing.pieceLength) || 0,
+    numPieces: (meta && meta.numPieces) || (existing && existing.numPieces) || 0,
+    complete: complete,
+    tracks: tracks,
+    art: (existing && existing.art) || { status: 'pending' },
+    addedAt: (existing && existing.addedAt) || new Date().toISOString(),
+    completedAt: complete
+      ? (existing && existing.completedAt) || new Date().toISOString()
+      : (existing && existing.completedAt) || null,
+  });
+}
+
 ipcMain.handle('add-torrent', async (event, magnetUri) => {
   // webtorrent.add() on an already-present infoHash emits an error. `restore-magnets`
   // re-sends every saved magnet on launch, so without this guard a relaunch errors
@@ -695,6 +824,12 @@ ipcMain.handle('add-torrent', async (event, magnetUri) => {
       magnets.push(magnetUri);
       store.set('magnets', magnets);
     }
+    // Metadata has arrived, so the index can finally describe this album. This is
+    // also the path that resolves a magnet the import had to skip for want of a
+    // cached .torrent.
+    indexFromLiveTorrent(data.id, magnetUri).catch((err) =>
+      console.warn('[library] could not index', data.id, '-', err.message)
+    );
   };
   const onProgress = (data) => send('torrent-progress', data);
   const onError = (err) => send('torrent-error', { message: err.message || String(err) });
@@ -704,6 +839,50 @@ ipcMain.handle('add-torrent', async (event, magnetUri) => {
 });
 
 ipcMain.handle('get-torrents', () => torrentService.getTorrents());
+
+/**
+ * The library as recorded on disk, independent of any live torrent.
+ *
+ * Album headers only — no track lists. A thousand albums of headers is a few tens of
+ * kilobytes over IPC, where the full index with tracks is megabytes, and the UI only
+ * needs tracks for whatever is open. `get-library-tracks` fetches those on demand.
+ */
+ipcMain.handle('get-library', () => {
+  return library.list().map((a) => ({
+    id: a.id,
+    name: a.name,
+    state: a.state,
+    complete: a.complete,
+    totalBytes: a.totalBytes,
+    presentBytes: a.presentBytes || 0,
+    trackCount: a.tracks.length,
+    art: a.art,
+    addedAt: a.addedAt || null,
+    completedAt: a.completedAt || null,
+  }));
+});
+
+ipcMain.handle('get-library-tracks', (event, albumId) => {
+  const record = library.get(albumId);
+  if (!record) return null;
+  return {
+    id: record.id,
+    name: record.name,
+    root: record.root,
+    complete: record.complete,
+    tracks: record.tracks.map((t, i) => ({
+      i: t.i != null ? t.i : i,
+      name: t.name,
+      path: t.path,
+      length: t.length,
+      verified: !!t.verified,
+      dur: t.dur != null ? t.dur : null,
+      // Only for tracks actually present, so the renderer never points a media
+      // element at a file that is not there.
+      localURL: t.verified ? fileServer.mediaUrl(record.id, t.i != null ? t.i : i) : null,
+    })),
+  };
+});
 
 // -- embedded artwork ------------------------------------------------------
 //
@@ -997,6 +1176,9 @@ ipcMain.handle('remove-torrent', async (event, torrentId, destroyStore) => {
   priorityTimers.delete(torrentId);
   priorityLast.delete(torrentId);
   piecePolicy.forget(realHash || hash);
+  // Tombstoned, not just dropped: without a recorded deletion the album would be
+  // replayed out of the log on the next load.
+  await library.remove(torrentId);
 });
 
 ipcMain.handle('get-download-path', () => torrentService.getDownloadPath());
@@ -1173,6 +1355,10 @@ ipcMain.handle('get-metrics', () => {
       maxEventLoopLagMs: Math.max(0, Math.round(maxLagMs)),
     },
     torrents: torrentService.getMemoryCost(),
+    // Next to liveTorrents, this is the pairing that answers the question the whole
+    // overhaul is about: does cost track what is *active*, or how much music has
+    // ever been added?
+    library: library.stats(),
     processes: processes,
   };
 });
