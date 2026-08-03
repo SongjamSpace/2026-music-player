@@ -8,7 +8,9 @@
     "start": "electron .",
     "dev": "electron .",
     "icon": "node scripts/make-icon.js",
-    "build": "npm run icon && node scripts/build-app.js",
+    "postinstall": "node scripts/patch-deps.js",
+    "check": "node scripts/patch-deps.js --check && node scripts/pe-handshake-check.js && node scripts/selection-check.js && node scripts/album-grouping-check.js",
+    "build": "node scripts/patch-deps.js --check && npm run icon && node scripts/build-app.js",
     "install-app": "npm run build && rm -rf '/Applications/2026 Music Player.app' && cp -R 'dist/2026 Music Player-darwin-arm64/2026 Music Player.app' /Applications/"
   },
   "keywords": [

@@ -111,9 +111,9 @@
       if (!info) return;
       var native = info.dumps && info.dumps.length;
       MP.toast.show(
-        native
-          ? 'The app crashed last session' + (info.utp ? ' with µTP enabled' : '') + '. Details written to errors.log.'
-          : 'The app closed unexpectedly last session. Details written to errors.log.',
+        (native
+          ? 'The app crashed last session' + (info.utp ? ' with µTP enabled' : '') + '.'
+          : 'The app stopped unexpectedly last session.') + ' Details written to errors.log.',
         {
           duration: 12000,
           action: { label: 'Show log', onClick: function () { window.playerAPI.openLogsFolder(); } },

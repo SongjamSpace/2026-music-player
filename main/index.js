@@ -104,6 +104,13 @@ function readAbnormalExit() {
   // wording stays honest about what is actually known. A matching Crashpad
   // dump is what distinguishes them.
   state.dumps = latestDumps(state.started);
+  state.diagnosis = state.dumps.length
+    ? 'native crash — a minidump was written'
+    : state.maxLagMs > 5000
+      ? 'no crash dump, and the main thread was already blocking for up to ' +
+        Math.round(state.maxLagMs / 1000) +
+        's — most likely a freeze'
+      : 'no crash dump — force quit, power loss, or a frozen event loop';
   recordError('previous session ended unexpectedly', new Error(JSON.stringify(state, null, 2)));
   return state;
 }
@@ -123,11 +130,25 @@ function latestDumps(sinceIso) {
   }
 }
 
+const SESSION_TICK_MS = 30000;
+// How late this timer runs is a direct measurement of main-thread blocking:
+// nothing else can delay it. A freeze that never ends can't be recorded from
+// inside the frozen process, but everything short of that shows up here — and
+// a large value in the last record before an unexplained exit is the signature
+// of an event loop that was already in trouble.
+let lastTickAt = Date.now();
+let maxLagMs = 0;
+
 /**
  * Breadcrumbs for the next crash. Cheap enough to run on a timer, and the only
  * way a native fault leaves any application-level context behind.
  */
 function writeSessionFlag() {
+  const now = Date.now();
+  const lag = now - lastTickAt - SESSION_TICK_MS;
+  if (lag > maxLagMs) maxLagMs = lag;
+  lastTickAt = now;
+
   let live = {};
   try {
     const d = torrentService.getDiagnostics();
@@ -150,7 +171,17 @@ function writeSessionFlag() {
   try {
     fs.writeFileSync(
       SESSION_FLAG,
-      JSON.stringify(Object.assign({ pid: process.pid, started: STARTED_AT, updated: new Date().toISOString() }, live))
+      JSON.stringify(
+        Object.assign(
+          {
+            pid: process.pid,
+            started: STARTED_AT,
+            updated: new Date().toISOString(),
+            maxLagMs: Math.max(0, Math.round(maxLagMs)),
+          },
+          live
+        )
+      )
     );
   } catch (_) {
     /* ignore */
@@ -487,7 +518,7 @@ app.whenReady().then(async () => {
   // evidence from the one that died.
   lastAbnormalExit = readAbnormalExit();
   writeSessionFlag();
-  setInterval(writeSessionFlag, 30000).unref();
+  setInterval(writeSessionFlag, SESSION_TICK_MS).unref();
 
   installStreamCorsHeaders();
   torrentService.setCacheDir(path.join(app.getPath('userData'), 'torrents'));
