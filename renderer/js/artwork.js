@@ -75,14 +75,19 @@
       .getAlbumArt(torrentId)
       .then(function (result) {
         inFlight.delete(torrentId);
-        if (result === null) {
-          // Parsed a complete file and found nothing — don't ask again.
+        var status = result && result.status;
+
+        // Only 'none' is terminal. 'pending' means nothing has finished
+        // downloading yet, so leaving the key unset is what allows a later tick
+        // to retry — the previous version could not tell the two apart and
+        // cached "no art" forever for any torrent that was still downloading
+        // when its tile first rendered, which was all of them.
+        if (status === 'none') {
           embedded.set(torrentId, null);
-        } else if (result && result.url) {
+        } else if (status === 'ok' && result.url) {
           embedded.set(torrentId, result.url);
           repaint(torrentId);
         }
-        // `undefined`/no candidates yet: leave unset so a later tick retries.
       })
       .catch(function () {
         inFlight.delete(torrentId);

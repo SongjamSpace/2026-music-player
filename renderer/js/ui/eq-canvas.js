@@ -38,8 +38,25 @@
   // preallocated buffers, sized on resize
   var freqs = null, mag = null, phase = null, total = null;
   var specBuf = null, specY = null, peakY = null;
+  // Column-edge frequencies (n+1 entries) and their FFT bin indices — see
+  // resize() and ensureBinBounds().
+  var freqEdges = null, binBounds = null, binBoundsRate = 0;
 
   var colors = {};
+  // Derived from `colors` and the computed font, rebuilt only on theme change or
+  // resize — see readColors(). Keeping these out of the frame is what makes rule
+  // 1 above actually true rather than aspirational.
+  var alphaColors = {};
+  var fontFamily = '';
+  var nodeFont = '';
+  var gridFont = '';
+  var specGradient = null;
+  // Reused by nodePos() so the frame doesn't allocate one object per band.
+  var nodePoint = { x: 0, y: 0 };
+  // Set by a ResizeObserver instead of reading clientWidth every frame.
+  var sizeDirty = true;
+  var resizeObserver = null;
+
   var selected = 0;
   var hovered = -1;
   var dragId = null;
@@ -59,6 +76,16 @@
 
   // -- theme -----------------------------------------------------------------
 
+  /**
+   * Everything derived from the stylesheet, read once per theme change.
+   *
+   * `getComputedStyle` forces a style recalculation, so it must never be called
+   * from inside a frame. It was: `drawNodes` read `fontFamily` once *per band*,
+   * which is twelve forced recalcs every frame, and `buildGrid` read it again.
+   * The alpha variants were also rebuilt per frame by `withAlpha` — string
+   * parsing and concatenation producing identical output every time, since the
+   * inputs only change with the theme.
+   */
   function readColors() {
     var cs = getComputedStyle(canvas);
     function v(name, fallback) {
@@ -78,6 +105,20 @@
       danger: v('--color-danger'),
       onAccent: v('--color-text-on-accent'),
     };
+    fontFamily = cs.fontFamily;
+    nodeFont = '9px ' + fontFamily;
+    gridFont = '10px ' + fontFamily;
+    // Precomputed alpha variants — every withAlpha() call that used to run per
+    // frame had constant arguments.
+    alphaColors = {
+      spectrumTop: withAlpha(colors.spectrum, 0.45),
+      spectrumBottom: withAlpha(colors.spectrum, 0.02),
+      peakLine: withAlpha(colors.peak, 0.55),
+      curveHalf: withAlpha(colors.curve, 0.5),
+      curveFill: withAlpha(colors.curve, 0.08),
+    };
+    // The gradient depends on H as well, so it is rebuilt by resize() too.
+    specGradient = null;
   }
 
   // -- sizing ----------------------------------------------------------------
@@ -104,15 +145,42 @@
     total = new Float32Array(n);
     specY = new Float32Array(n);
     peakY = new Float32Array(n);
+    // One column past the end: drawSpectrum needs the frequency of the *next*
+    // column to know how many FFT bins a column spans. It was calling fOf(x) and
+    // fOf(x+1) per column per frame — roughly 1,200 Math.exp calls a frame, for
+    // values that only change when the canvas is resized, and half of which were
+    // already sitting unused in freqs[].
+    freqEdges = new Float32Array(n + 1);
     for (var i = 0; i < n; i++) {
       freqs[i] = fOf(i);
+      freqEdges[i] = freqs[i];
       specY[i] = H;
       peakY[i] = H;
     }
+    freqEdges[n] = fOf(n);
+
+    // Depends on H, so it cannot outlive a resize.
+    specGradient = null;
+    binBoundsRate = 0;
 
     buildGrid();
     curveDirty = true;
     return true;
+  }
+
+  /**
+   * FFT bin index for each column edge, cached against the analyser's bin width.
+   *
+   * The mapping is column → frequency → bin, and only the last step depends on
+   * anything that can change while the panel is open (sample rate and fftSize,
+   * both effectively fixed). Recomputing it per frame was the other half of the
+   * per-column arithmetic.
+   */
+  function ensureBinBounds(binHz) {
+    if (binBoundsRate === binHz && binBounds && binBounds.length === freqEdges.length) return;
+    binBoundsRate = binHz;
+    binBounds = new Float32Array(freqEdges.length);
+    for (var i = 0; i < freqEdges.length; i++) binBounds[i] = freqEdges[i] / binHz;
   }
 
   function buildGrid() {
@@ -126,7 +194,7 @@
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     c.clearRect(0, 0, W, H);
     c.lineWidth = 1;
-    c.font = '10px ' + getComputedStyle(canvas).fontFamily;
+    c.font = gridFont;
     c.textBaseline = 'bottom';
 
     var verticals = [30, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 15000];
@@ -248,9 +316,11 @@
     var n = specY.length;
     var decay = reduceMotion ? 0 : 0.4;
 
+    ensureBinBounds(binHz);
+
     for (var x = 0; x < n; x++) {
-      var b0 = fOf(x) / binHz;
-      var b1 = fOf(x + 1) / binHz;
+      var b0 = binBounds[x];
+      var b1 = binBounds[x + 1];
       var v;
       if (b1 - b0 < 1) {
         // Sub-bin column (the low end): interpolate between neighbours.
@@ -277,10 +347,14 @@
     for (var k = 0; k < n; k++) g.lineTo(k, specY[k]);
     g.lineTo(n - 1, H);
     g.closePath();
-    var grad = g.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, withAlpha(colors.spectrum, 0.45));
-    grad.addColorStop(1, withAlpha(colors.spectrum, 0.02));
-    g.fillStyle = grad;
+    // Built once per theme/resize rather than per frame — a CanvasGradient plus
+    // two parsed colour strings, every frame, for a gradient that never changed.
+    if (!specGradient) {
+      specGradient = g.createLinearGradient(0, 0, 0, H);
+      specGradient.addColorStop(0, alphaColors.spectrumTop);
+      specGradient.addColorStop(1, alphaColors.spectrumBottom);
+    }
+    g.fillStyle = specGradient;
     g.fill();
 
     if (!reduceMotion) {
@@ -289,7 +363,7 @@
         if (j === 0) g.moveTo(0, peakY[0]);
         else g.lineTo(j, peakY[j]);
       }
-      g.strokeStyle = withAlpha(colors.peak, 0.55);
+      g.strokeStyle = alphaColors.peakLine;
       g.lineWidth = 1;
       g.stroke();
     }
@@ -311,37 +385,54 @@
 
   // -- nodes -----------------------------------------------------------------
 
+  /**
+   * Position of a band's node.
+   *
+   * Writes into a shared object rather than allocating: this is called per band
+   * per frame from drawNodes, and again per band on every pointermove from
+   * hitTest. Callers must read the result before the next call — none of them
+   * hold onto it.
+   */
   function nodePos(band) {
     var gainless = !!D().GAINLESS_TYPES[band.type];
-    return { x: xOf(band.f), y: gainless ? yOf(0) : yOf(band.g) };
+    nodePoint.x = xOf(band.f);
+    nodePoint.y = gainless ? yOf(0) : yOf(band.g);
+    return nodePoint;
   }
 
   function drawNodes() {
     var list = bands();
+    // Set once for the whole pass. `g.font` used to be assigned per band from a
+    // fresh getComputedStyle(canvas) — twelve forced style recalculations every
+    // frame, for a font that only changes with the theme.
+    g.font = nodeFont;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+
     for (var i = 0; i < list.length; i++) {
       var band = list[i];
       var p = nodePos(band);
+      var px = p.x;
+      var py = p.y;
       var isSel = i === selected;
       var isHover = i === hovered;
 
       g.beginPath();
-      g.arc(p.x, p.y, NODE_R + (isSel ? 2 : 0), 0, Math.PI * 2);
+      g.arc(px, py, NODE_R + (isSel ? 2 : 0), 0, Math.PI * 2);
       g.fillStyle = band.on ? (isSel ? colors.accentHover : colors.accent) : colors.node;
       g.globalAlpha = band.on ? 1 : 0.5;
       g.fill();
       g.globalAlpha = 1;
       g.lineWidth = isSel || isHover ? 2 : 1.5;
-      g.strokeStyle = isSel ? colors.curve : withAlpha(colors.curve, 0.5);
+      g.strokeStyle = isSel ? colors.curve : alphaColors.curveHalf;
       g.stroke();
 
       g.fillStyle = band.on ? colors.onAccent : colors.label;
-      g.font = '9px ' + getComputedStyle(canvas).fontFamily;
-      g.textAlign = 'center';
-      g.textBaseline = 'middle';
-      g.fillText(String(i + 1), p.x, p.y + 0.5);
-      g.textAlign = 'start';
-      g.textBaseline = 'alphabetic';
+      g.fillText(String(i + 1), px, py + 0.5);
     }
+
+    g.textAlign = 'start';
+    g.textBaseline = 'alphabetic';
   }
 
   function hitTest(x, y) {
@@ -373,7 +464,18 @@
     if (now - lastFrame < minInterval) return;
     lastFrame = now;
 
-    if (resize()) readColors();
+    // Only when the element has actually changed size. `resize()` reads
+    // clientWidth/clientHeight, which forces a style-and-layout flush — doing
+    // that unconditionally meant a forced layout every single frame, to discover
+    // that nothing had moved. A ResizeObserver tells us instead.
+    // A move to a display with a different pixel ratio changes nothing about the
+    // element's CSS size, so the observer stays silent — but the backing store
+    // still has to be rebuilt or the canvas goes soft. Reading
+    // devicePixelRatio is not a layout property, so this check is free.
+    if (sizeDirty || (window.devicePixelRatio || 1) !== dpr) {
+      sizeDirty = false;
+      if (resize()) readColors();
+    }
     if (!W || !H) return;
     if (curveDirty) rebuildCurve();
 
@@ -385,7 +487,7 @@
     drawSpectrum();
 
     // curve fill then stroke
-    g.fillStyle = withAlpha(colors.curve, 0.08);
+    g.fillStyle = alphaColors.curveFill;
     g.fill(curveFill);
     g.strokeStyle = colors.curve;
     g.lineWidth = 1.75;
@@ -660,6 +762,15 @@
     canvas.addEventListener('dblclick', onDblClick);
     canvas.addEventListener('contextmenu', onContextMenu);
     canvas.addEventListener('keydown', onKeyDown);
+
+    // Replaces a forced layout read on every frame. Fires once on observe, which
+    // is what performs the initial sizing.
+    if (window.ResizeObserver) {
+      resizeObserver = new ResizeObserver(function () { sizeDirty = true; });
+      resizeObserver.observe(canvas);
+    } else {
+      sizeDirty = true;
+    }
 
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) stop();

@@ -14,6 +14,7 @@
   var POLL_MS = 2000;
 
   var root, toggleBtn, body, verdictEl, ratesEl, peersEl, transportEl, strategyEl, reachEl, reachBtn;
+  var memoryEl;
   var currentId = null;
   var timer = null;
   var open = false;
@@ -206,9 +207,50 @@
     });
   }
 
+  /**
+   * Memory, because "why is this app using 2 GB" was not answerable from inside
+   * the app at all — and it is the question that matters most as the library
+   * grows. `liveTorrents` next to the footprint is the important pairing: it is
+   * what shows whether cost tracks what is actually active or just how much music
+   * has ever been added.
+   */
+  function paintMemory(m) {
+    if (!m) {
+      memoryEl.textContent = '';
+      return;
+    }
+    var fmt = MP.util.formatBytes;
+    var totalFootprint = (m.processes || []).reduce(function (n, p) {
+      return n + (p.footprintBytes || 0);
+    }, 0);
+    var t = m.torrents || {};
+
+    memoryEl.textContent =
+      'Memory ' + fmt(totalFootprint || m.main.rssBytes) +
+      ' (heap ' + fmt(m.main.heapUsedBytes) +
+      ', buffers ' + fmt(m.main.arrayBuffersBytes || 0) + ')' +
+      ' · ' + (t.liveTorrents || 0) + ' live · ' + (t.totalWires || 0) + ' wires' +
+      // Started-but-unfinished pieces are the number that matters here: each holds
+      // 16 KB block buffers outside the JS heap, which is how the process can grow
+      // while the heap stays flat. It climbs when the picker starts pieces it does
+      // not finish.
+      ' · ' + (t.startedPieces || 0) + ' started pieces (' + fmt(t.startedPieceBytes || 0) + ')' +
+      ' · cache ≤' + fmt(t.predictedCacheBytes || 0) +
+      ' · loop lag ' + (m.main.maxEventLoopLagMs || 0) + 'ms';
+
+    // The event loop is the thing that beachballs, so flag it rather than leaving
+    // the number to be read.
+    memoryEl.className =
+      'net-panel__row ' +
+      (m.main.maxEventLoopLagMs > 1000 ? 'is-bad' : m.main.maxEventLoopLagMs > 250 ? 'is-warn' : '');
+  }
+
   function refresh() {
     if (!currentId) return;
     window.playerAPI.getDiagnostics(currentId).then(paint);
+    // Independent of the per-torrent diagnostics: memory is a property of the
+    // process, not of whatever happens to be selected.
+    window.playerAPI.getMetrics().then(paintMemory).catch(function () {});
   }
 
   function setOpen(next) {
@@ -249,6 +291,10 @@
     peersEl = MP.util.el('div', 'net-panel__row');
     transportEl = MP.util.el('div', 'net-panel__row');
     strategyEl = MP.util.el('div', 'net-panel__row');
+    memoryEl = MP.util.el('div', 'net-panel__row');
+    memoryEl.title =
+      'Memory this app is using, and what the torrent engine is holding. ' +
+      'Piece cache is a worst-case ceiling, not a reading.';
     reachEl = MP.util.el('div', 'net-panel__row');
     reachEl.hidden = true;
 
@@ -257,7 +303,7 @@
     reachBtn.title = 'Ask the trackers who is in this swarm, then try to connect to each of them';
     reachBtn.addEventListener('click', runReach);
 
-    [verdictEl, ratesEl, peersEl, transportEl, strategyEl, reachEl, reachBtn].forEach(function (n) {
+    [verdictEl, ratesEl, peersEl, transportEl, strategyEl, memoryEl, reachEl, reachBtn].forEach(function (n) {
       body.appendChild(n);
     });
     root.appendChild(toggleBtn);

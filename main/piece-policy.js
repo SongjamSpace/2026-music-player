@@ -12,6 +12,13 @@
  *      is exposed, rarest once it is comfortably ahead, with a wide hysteresis
  *      band so it can't flap.
  *
+ *      With one hard limit on top: rarest is only ever applied to torrents small
+ *      enough that webtorrent's rarity scan is cheap. It is O(all pieces) per
+ *      call inside a loop over the selection span, so on a 5,847-piece
+ *      discography it dominated the main thread and stalled the event loop for
+ *      over a second at a time. See tuning.rarestIsAffordable for the profile.
+ *      This is why `applyStrategy` is the only place strategy is assigned.
+ *
  *   2. Readahead. WebTorrent's own FileStream marks at most 2 pieces critical
  *      ahead of the read head (`_criticalLength`), which at a typical piece
  *      length is on the order of ten seconds of audio. Any dip in speed becomes
@@ -21,6 +28,8 @@
  * decide *what* is wanted, this decides *what first*. Nothing here ever narrows
  * the download to a subset of the torrent.
  */
+
+const tuning = require('./tuning');
 
 const TICK_MS = 1000;
 
@@ -55,7 +64,10 @@ function createPiecePolicy({ service, getPrefs }) {
   let playback = null; // { torrentId, fileIndex, nextFileIndex, currentTime, duration }
   let last = { strategy: null, headPiece: null, readahead: null, secondsBuffered: null };
   // The critical window we last applied, so an unmoved play head costs nothing.
-  let lastWindow = { key: null, ranges: '' };
+  let lastWindow = { key: null, ranges: '', headPiece: null };
+  // Piece indices this module marked critical, so they can be retracted without
+  // walking — or disturbing — the rest of the torrent's flags.
+  let ourCritical = new Set();
 
   /**
    * A torrent this tick is allowed to touch.
@@ -88,20 +100,87 @@ function createPiecePolicy({ service, getPrefs }) {
    * request the same block from several peers at once. Left alone the set grows
    * monotonically for the life of the torrent and quietly burns bandwidth.
    *
+   * Clears only what *we* marked, tracked in `ourCritical`, rather than sweeping
+   * the whole array. The sweep was O(total pieces in the torrent) with a closure
+   * call per piece — 5,847 pieces for the largest album here, every time the
+   * window moved — to clear at most a few dozen flags we had set ourselves.
+   * WebTorrent's own FileStream criticality is deliberately left alone: it is
+   * not ours to clear, and clearing it was never the point.
+   *
    * @param {Array<Array<number>>} keep  Inclusive [from, to] ranges to preserve.
    */
   function collectCritical(torrent, keep) {
     const critical = torrent._critical;
     if (!Array.isArray(critical)) return;
-    const inKeep = (i) => keep.some(([from, to]) => i >= from && i <= to);
-    for (let i = 0; i < critical.length; i++) {
-      if (critical[i] && !inKeep(i)) critical[i] = false;
+    for (const i of ourCritical) {
+      let inKeep = false;
+      for (let k = 0; k < keep.length; k++) {
+        if (i >= keep[k][0] && i <= keep[k][1]) {
+          inKeep = true;
+          break;
+        }
+      }
+      if (!inKeep) {
+        critical[i] = false;
+        ourCritical.delete(i);
+      }
     }
   }
 
+  /** Remember a range as ours, so collectCritical can retract exactly it later. */
+  function markOurs(from, to) {
+    for (let i = from; i <= to; i++) ourCritical.add(i);
+  }
+
+  // -- monotonic progress memos --------------------------------------------
+  //
+  // `file.progress` is a getter over `file.downloaded`, which loops every piece
+  // of the file and allocates two closures per call (webtorrent/lib/file.js
+  // :42-84). This tick asked for two of them every second, forever, to answer
+  // two questions whose answers can only ever flip one way: "is the current
+  // track 60% in hand" and "is the next track finished". So once either is true
+  // it is remembered and never recomputed.
+
+  /** infoHash + ':' + fileIndex for whichever answers have already latched. */
+  const prefetchReached = new Set();
+  const filesComplete = new Set();
+
+  function memoKey(torrent, fileIndex) {
+    return torrent.infoHash + ':' + fileIndex;
+  }
+
+  function reachedPrefetchPoint(torrent, fileIndex, file) {
+    const key = memoKey(torrent, fileIndex);
+    if (prefetchReached.has(key)) return true;
+    if (file.progress >= NEXT_TRACK_PREFETCH_AFTER) {
+      prefetchReached.add(key);
+      return true;
+    }
+    return false;
+  }
+
+  function isFileComplete(torrent, fileIndex, file) {
+    const key = memoKey(torrent, fileIndex);
+    if (filesComplete.has(key)) return true;
+    if (file.progress >= 1) {
+      filesComplete.add(key);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * @param {string} wanted  'rarest' or 'sequential'.
+   *
+   * Rarest is downgraded to sequential on any torrent big enough for webtorrent's
+   * O(pieces) rarity scan to matter — see tuning.rarestIsAffordable, which carries
+   * the profile that justifies the bound. This is the only place that decision is
+   * made, so it covers the active torrent and background ones alike.
+   */
   function applyStrategy(torrent, wanted) {
-    if (torrent.strategy === wanted) return;
-    torrent.strategy = wanted;
+    var effective = wanted === 'rarest' && !tuning.rarestIsAffordable(torrent) ? 'sequential' : wanted;
+    if (torrent.strategy === effective) return;
+    torrent.strategy = effective;
   }
 
   function tick() {
@@ -164,9 +243,14 @@ function createPiecePolicy({ service, getPrefs }) {
 
     // Once the current track is mostly in hand, pull the head of the next one
     // so the handover doesn't stall on a cold start.
-    if (prefs.prefetch !== false && file.progress >= NEXT_TRACK_PREFETCH_AFTER) {
+    if (prefs.prefetch !== false && reachedPrefetchPoint(active, playback.fileIndex, file)) {
       const nextFile = active.files[playback.nextFileIndex];
-      if (nextFile && nextFile.length && nextFile !== file && nextFile.progress < 1) {
+      if (
+        nextFile &&
+        nextFile.length &&
+        nextFile !== file &&
+        !isFileComplete(active, playback.nextFileIndex, nextFile)
+      ) {
         const span = clamp(
           Math.ceil((NEXT_TRACK_PREFETCH_S * (nextFile.length / duration)) / pieceLength),
           1,
@@ -177,15 +261,44 @@ function createPiecePolicy({ service, getPrefs }) {
     }
 
     // `critical()` re-runs the full selection update, which walks every piece
-    // against every wire — at 120 peers that is not something to do once a
-    // second for no reason. The flags are sticky, so re-applying an unchanged
-    // window would be pure cost.
+    // against every wire — at 60 peers that is not something to do once a second
+    // for no reason. The flags are sticky, so re-applying an unchanged window
+    // would be pure cost.
+    //
+    // The signature guard alone was not enough: the play head advances every
+    // tick, so `headPiece` — and therefore the signature — changed on every
+    // single pass and the guard never once held. Re-applying only when the head
+    // has moved at least half the readahead window keeps the buffer covered (the
+    // window is `readahead` pieces deep, so half of it is still ahead of the
+    // head when we refresh) while cutting the work to roughly one pass in
+    // `readahead/2` ticks.
     const key = active.infoHash;
-    const signature = keep.map((r) => r.join('-')).join(',');
-    if (lastWindow.key !== key || lastWindow.ranges !== signature) {
-      keep.forEach(([from, to]) => active.critical(from, to));
+    const sameTorrent = lastWindow.key === key;
+    const drift = sameTorrent && lastWindow.headPiece != null
+      ? headPiece - lastWindow.headPiece
+      : Infinity;
+
+    // Only the ranges *past* the readahead window — i.e. the next-track prefetch.
+    // Signing the whole of `keep` would be useless here: the first range starts
+    // at `headPiece`, so its signature changes on every tick and any guard built
+    // on it can never hold. Drift covers that range; this covers the rest.
+    const signature = keep.slice(1).map((r) => r.join('-')).join(',');
+
+    // Backwards is a seek, not drift: honour it immediately, or the listener
+    // waits on a window still sitting ahead of wherever they jumped from.
+    const seeked = drift < 0;
+    const advanced = drift >= Math.max(1, Math.floor(readahead / 2));
+    const prefetchChanged = lastWindow.ranges !== signature;
+
+    if (!sameTorrent) ourCritical = new Set();
+
+    if (!sameTorrent || seeked || advanced || prefetchChanged) {
+      keep.forEach(([from, to]) => {
+        active.critical(from, to);
+        markOurs(from, to);
+      });
       collectCritical(active, keep);
-      lastWindow = { key, ranges: signature };
+      lastWindow = { key, ranges: signature, headPiece };
     }
 
     last = { strategy: active.strategy, headPiece, readahead, secondsBuffered };
@@ -216,6 +329,29 @@ function createPiecePolicy({ service, getPrefs }) {
     stop() {
       clearInterval(timer);
       timer = null;
+      ourCritical = new Set();
+      prefetchReached.clear();
+      filesComplete.clear();
+      lastWindow = { key: null, ranges: '', headPiece: null };
+    },
+
+    /**
+     * Drop memoised state for a torrent that is going away.
+     *
+     * These sets are keyed by infoHash and would otherwise be the one thing here
+     * that grows for the life of the process — small per entry, but unbounded
+     * across a library that gets added to, which is exactly the shape of leak
+     * this whole pass is about.
+     */
+    forget(infoHash) {
+      if (!infoHash) return;
+      const prefix = infoHash + ':';
+      for (const key of prefetchReached) if (key.startsWith(prefix)) prefetchReached.delete(key);
+      for (const key of filesComplete) if (key.startsWith(prefix)) filesComplete.delete(key);
+      if (lastWindow.key === infoHash) {
+        lastWindow = { key: null, ranges: '', headPiece: null };
+        ourCritical = new Set();
+      }
     },
 
     /** @param {object|null} state  null when playback stops. */

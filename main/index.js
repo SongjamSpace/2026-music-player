@@ -1,6 +1,11 @@
 const { app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, session, shell } = require('electron');
 const fs = require('fs');
+// Async FS for anything that touches the download root: it lives on an external
+// drive, and a sync call against a spun-down disk blocks the wire protocol.
+// The crash-diagnostics paths stay sync on purpose — see writeSessionFlag.
+const fsp = require('fs/promises');
 const net = require('net');
+const crypto = require('crypto');
 const dgram = require('dgram');
 const path = require('path');
 const Store = require('electron-store');
@@ -164,6 +169,14 @@ function writeSessionFlag() {
       wires: client ? client.torrents.reduce((n, t) => n + ((t.wires && t.wires.length) || 0), 0) : 0,
       inboundNow: d ? d.inboundNow : null,
       inboundPeak: d ? d.inboundPeak : null,
+      // Memory, because the failure this app actually exhibits is not a fault —
+      // it is the main process growing until macOS starts compressing and
+      // swapping its pages, at which point every IPC round trip can block on a
+      // page-in and the app beachballs. A dump tells you nothing about that; a
+      // heap trend across sessions does. rss understates a swapped process, so
+      // heapUsed is recorded next to it as the V8-side number.
+      rssMb: Math.round(process.memoryUsage.rss() / 1048576),
+      heapMb: Math.round(process.memoryUsage().heapUsed / 1048576),
     };
   } catch (_) {
     /* diagnostics must never be able to break the thing recording the crash */
@@ -569,7 +582,8 @@ app.whenReady().then(async () => {
   piecePolicy.start();
 
   const savedPath = store.get('downloadPath');
-  if (savedPath) {
+  const library = checkLibraryRoot(savedPath);
+  if (savedPath && library.ok) {
     torrentService.setDownloadPath(savedPath);
   }
 
@@ -577,9 +591,12 @@ app.whenReady().then(async () => {
   createWindow();
 
   const savedMagnets = store.get('magnets', []);
-  if (savedMagnets.length > 0 && mainWindow) {
+  if (mainWindow) {
     mainWindow.webContents.once('did-finish-load', () => {
-      send('restore-magnets', savedMagnets);
+      // The library warning goes first: if the drive is missing, the renderer must
+      // know before it starts rendering torrents that will all read as 0%.
+      if (!library.ok) send('library-unavailable', library);
+      else if (savedMagnets.length > 0) send('restore-magnets', savedMagnets);
     });
   }
 });
@@ -659,17 +676,46 @@ ipcMain.handle('get-torrents', () => torrentService.getTorrents());
 // -- embedded artwork ------------------------------------------------------
 //
 // Plenty of releases ship no cover.jpg at all and carry the art in the audio
-// tags instead — that's what Finder and Music.app are reading. `null` is only
-// cached once we've actually parsed a complete file and found nothing, so a
-// torrent that simply hasn't downloaded yet gets retried.
+// tags instead — that's what Finder and Music.app are reading.
+//
+// The reply is an explicit status rather than a nullable value, because the two
+// "no art right now" cases are not the same and conflating them was a real bug:
+// this handler returned `null` both for "nothing has finished downloading yet,
+// ask again" and for "parsed a complete file and there is genuinely no art,
+// stop asking", while the renderer treated `null` as terminal. Art therefore
+// never appeared for any torrent that was still incomplete the first time a tile
+// asked for it — which is every torrent, since tiles render immediately.
+//
+//   pending  nothing complete to read yet; ask again later
+//   none     parsed and there is no embedded art; terminal
+//   ok       `url` is a data URL of the picture
+const ART_STATUS = { pending: 'pending', none: 'none', ok: 'ok' };
 
+/**
+ * Bounded because it holds base64 image data — roughly 1.37x the JPEG per entry,
+ * and a 3 MB cover is not unusual. It previously grew for the life of the process
+ * and was not even cleared when a torrent was removed. Phase 6 replaces the data
+ * URLs with resized files on disk served by URL; until then, cap the count.
+ */
+const ART_CACHE_MAX = 32;
 const albumArtCache = new Map();
+
+function cacheArt(torrentId, value) {
+  // Insertion-ordered, so the oldest key is the first — a good-enough LRU for a
+  // cache this small, and cheaper than tracking access times.
+  if (albumArtCache.size >= ART_CACHE_MAX && !albumArtCache.has(torrentId)) {
+    albumArtCache.delete(albumArtCache.keys().next().value);
+  }
+  albumArtCache.set(torrentId, value);
+  return value;
+}
 
 ipcMain.handle('get-album-art', async (event, torrentId) => {
   if (albumArtCache.has(torrentId)) return albumArtCache.get(torrentId);
 
   const candidates = torrentService.getCompleteAudioPaths(torrentId, 3);
-  if (!candidates.length) return null; // nothing complete yet — ask again later
+  // Deliberately not cached: this is the retryable case.
+  if (!candidates.length) return { status: ART_STATUS.pending };
 
   for (const file of candidates) {
     try {
@@ -679,23 +725,144 @@ ipcMain.handle('get-album-art', async (event, torrentId) => {
         const url =
           'data:' + (picture.format || 'image/jpeg') + ';base64,' +
           Buffer.from(picture.data).toString('base64');
-        const result = { url, artist: meta.common.artist || null, album: meta.common.album || null };
-        albumArtCache.set(torrentId, result);
-        return result;
+        return cacheArt(torrentId, {
+          status: ART_STATUS.ok,
+          url,
+          artist: meta.common.artist || null,
+          album: meta.common.album || null,
+        });
       }
     } catch (err) {
       console.warn('[art] could not read tags from', path.basename(file), '-', err.message);
     }
   }
 
-  albumArtCache.set(torrentId, null);
-  return null;
+  return cacheArt(torrentId, { status: ART_STATUS.none });
 });
+
+// -- library root safety ---------------------------------------------------
+//
+// The library lives on an external drive, and losing sight of it is the most
+// destructive thing that can happen to this app — far worse than a crash.
+//
+// `/Volumes/My Book/...` is an ordinary path when the drive is not mounted:
+// macOS will happily let a stub directory be created there. WebTorrent then sees
+// every torrent at 0%, and starts re-downloading the entire library over the
+// swarm — 11.4 GB, on a metered connection, silently overwriting nothing but
+// wasting everything. Checking `existsSync` alone does not catch it, because
+// after the first bad launch the stub directory *does* exist.
+//
+// So the root has to identify itself. A marker file holding a random id, written
+// once and compared on every launch, distinguishes "my library" from "some empty
+// directory that happens to sit at the same path". It also survives the drive
+// being renamed or remounted at a different mount point, which a volume UUID
+// from `diskutil` would not, and it needs no subprocess.
+
+const LIBRARY_MARKER = '.mp-library-id';
+
+/**
+ * @param {string} root
+ * @param {boolean=} adopt  True when the user has just picked this folder in a
+ *   dialog. That is an explicit act, so an empty directory is a legitimate
+ *   choice — someone moving the library to a fresh drive — rather than the
+ *   unmounted-volume signature it would be at launch.
+ * @returns {{ok: boolean, reason?: string, path?: string}}
+ *   `ok: false` means: add nothing, seed nothing, and tell the user. Never
+ *   create the directory — creating it is the bug.
+ */
+function checkLibraryRoot(root, adopt) {
+  if (!root) return { ok: true }; // never configured; the default path applies
+  const markerPath = path.join(root, LIBRARY_MARKER);
+  const expected = store.get('libraryId') || null;
+
+  let stat;
+  try {
+    stat = fs.statSync(root);
+  } catch (_) {
+    return { ok: false, reason: 'missing', path: root };
+  }
+  if (!stat.isDirectory()) return { ok: false, reason: 'missing', path: root };
+
+  let marker = null;
+  try {
+    marker = fs.readFileSync(markerPath, 'utf8').trim() || null;
+  } catch (_) {
+    /* no marker yet */
+  }
+
+  // First run against a root we have never stamped. Adopt it rather than
+  // refusing — but only if it is genuinely ours: an empty directory at this path
+  // with torrents already in the library is exactly the unmounted-drive case.
+  if (!expected) {
+    if (!marker) {
+      const hasLibrary = (store.get('magnets', []) || []).length > 0;
+      let looksPopulated = false;
+      try {
+        looksPopulated = fs.readdirSync(root).some((n) => !n.startsWith('.'));
+      } catch (_) {
+        /* unreadable — treat as empty */
+      }
+      // An unstamped, empty root while the library is non-empty is the
+      // unmounted-drive signature. Unless the user just chose it by hand.
+      if (!adopt && hasLibrary && !looksPopulated) {
+        return { ok: false, reason: 'empty', path: root };
+      }
+      marker = crypto.randomUUID();
+      try {
+        fs.writeFileSync(markerPath, marker);
+      } catch (err) {
+        // A read-only or absent volume. Do not proceed on a guess.
+        return { ok: false, reason: 'unwritable', path: root, detail: err.message };
+      }
+    }
+    store.set('libraryId', marker);
+    return { ok: true };
+  }
+
+  // Stamped in prefs but the marker is not there. Could be our drive with the
+  // dotfile deleted, or could be a stub at the same path — and we cannot tell.
+  // Refusing is recoverable (re-pick the folder in Settings); proceeding risks
+  // re-downloading the entire library, so this errs toward refusing.
+  if (!marker) return { ok: false, reason: 'unstamped', path: root };
+  if (marker !== expected) return { ok: false, reason: 'mismatch', path: root };
+  return { ok: true };
+}
 
 // -- local-folder fallback -------------------------------------------------
 
+/**
+ * Directory listing of the download root, cached for a few seconds.
+ *
+ * The library lives on an external drive, and `readdirSync` against a spun-down
+ * USB disk blocks for seconds — on the same thread as the wire protocol, the
+ * piece picker and every IPC reply. So: async, and not re-read once per torrent
+ * when the user clicks through several unresolved albums in a row.
+ *
+ * The TTL is short because the point of this scan is to notice files the user
+ * put there by hand.
+ */
+const ROOT_LISTING_TTL_MS = 5000;
+let rootListing = { root: null, at: 0, dirs: null };
+
+async function listDownloadRoot() {
+  const root = torrentService.getDownloadPath();
+  const now = Date.now();
+  if (rootListing.root === root && rootListing.dirs && now - rootListing.at < ROOT_LISTING_TTL_MS) {
+    return rootListing.dirs;
+  }
+  let dirs = [];
+  try {
+    const entries = await fsp.readdir(root, { withFileTypes: true });
+    dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (_) {
+    /* root missing or unreadable — treat as empty, never as an error */
+  }
+  rootListing = { root, at: now, dirs };
+  return dirs;
+}
+
 /** Locate the download folder for a torrent we have no metadata for. */
-function findLocalFolder(torrentId) {
+async function findLocalFolder(torrentId) {
   const magnet = store.get('magnets', []).find((m) => infoHashFromMagnet(m) === torrentId);
   if (!magnet) return null;
   const dn = /[?&]dn=([^&]+)/.exec(magnet);
@@ -709,47 +876,60 @@ function findLocalFolder(torrentId) {
   }
 
   const root = torrentService.getDownloadPath();
-  const direct = path.join(root, name);
-  if (fs.existsSync(direct) && fs.statSync(direct).isDirectory()) return direct;
+  try {
+    const st = await fsp.stat(path.join(root, name));
+    if (st.isDirectory()) return path.join(root, name);
+  } catch (_) {
+    /* no exact match — fall through to the loose one */
+  }
 
   // The folder on disk comes from the .torrent's name, which can differ from
   // the magnet's display name, so fall back to a loose match.
   const normalise = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
   const target = normalise(name);
-  try {
-    const hit = fs
-      .readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .find((e) => {
-        const n = normalise(e.name);
-        return n === target || n.startsWith(target.slice(0, 24)) || target.startsWith(n.slice(0, 24));
-      });
-    return hit ? path.join(root, hit.name) : null;
-  } catch (_) {
-    return null;
-  }
+  const hit = (await listDownloadRoot()).find((dirName) => {
+    const n = normalise(dirName);
+    return n === target || n.startsWith(target.slice(0, 24)) || target.startsWith(n.slice(0, 24));
+  });
+  return hit ? path.join(root, hit) : null;
 }
 
-function countMedia(folder) {
+/**
+ * How many real audio tracks are in a folder.
+ *
+ * `._name.mp3` files are excluded deliberately. The library sits on exFAT, which
+ * has no native extended attributes, so macOS writes every xattr into an
+ * AppleDouble sidecar next to the real file — same extension, a few hundred
+ * bytes. Counting those doubled the reported track count on that drive, and a
+ * folder of nothing but sidecars would have read as "already downloaded".
+ */
+async function countMedia(folder) {
   try {
-    return fs.readdirSync(folder).filter((f) => AUDIO_RE.test(f)).length;
+    const entries = await fsp.readdir(folder, { withFileTypes: true });
+    let n = 0;
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      if (e.name.startsWith('._')) continue;
+      if (AUDIO_RE.test(e.name)) n++;
+    }
+    return n;
   } catch (_) {
     return 0;
   }
 }
 
-ipcMain.handle('check-local-folder', (event, torrentId) => {
+ipcMain.handle('check-local-folder', async (event, torrentId) => {
   if (torrentService.hasMetadata(torrentId)) return { available: false };
-  const folder = findLocalFolder(torrentId);
+  const folder = await findLocalFolder(torrentId);
   if (!folder) return { available: false };
-  const trackCount = countMedia(folder);
+  const trackCount = await countMedia(folder);
   return trackCount > 0
     ? { available: true, path: folder, name: path.basename(folder), trackCount }
     : { available: false };
 });
 
 ipcMain.handle('load-from-disk', async (event, torrentId) => {
-  const folder = findLocalFolder(torrentId);
+  const folder = await findLocalFolder(torrentId);
   if (!folder) return { error: 'No matching folder in your downloads' };
   try {
     const onProgress = (data) => send('torrent-progress', data);
@@ -767,12 +947,24 @@ ipcMain.handle('load-from-disk', async (event, torrentId) => {
 });
 
 ipcMain.handle('remove-torrent', async (event, torrentId, destroyStore) => {
+  // Capture the real infohash before removal drops the alias, or piecePolicy's
+  // per-torrent memos have nothing to key off.
+  const realHash = torrentService.realInfoHash(torrentId);
   await torrentService.remove(torrentId, destroyStore);
   const hash = String(torrentId).toLowerCase();
   const magnets = store.get('magnets', []);
   // Match on the parsed infohash, not a substring of the whole URI — a `dn=` display
   // name could otherwise contain the hash and take an unrelated magnet with it.
   store.set('magnets', magnets.filter((m) => infoHashFromMagnet(m) !== hash));
+
+  // Everything else in this process keyed by torrent id. None of this was being
+  // released: removing an album left its artwork, its debounce timers and its
+  // piece-policy memos behind for the life of the session.
+  albumArtCache.delete(torrentId);
+  clearTimeout(priorityTimers.get(torrentId));
+  priorityTimers.delete(torrentId);
+  priorityLast.delete(torrentId);
+  piecePolicy.forget(realHash || hash);
 });
 
 ipcMain.handle('get-download-path', () => torrentService.getDownloadPath());
@@ -780,6 +972,12 @@ ipcMain.handle('get-download-path', () => torrentService.getDownloadPath());
 ipcMain.handle('set-download-path', (event, dir) => {
   torrentService.setDownloadPath(dir);
   store.set('downloadPath', dir);
+  // Choosing a folder is an explicit act, so re-stamp: this root is now the
+  // library, whatever the old marker said. Without this, switching drives would
+  // trip the mismatch guard on the next launch.
+  store.delete('libraryId');
+  const library = checkLibraryRoot(dir, true);
+  if (!library.ok) send('library-unavailable', library);
   return torrentService.getDownloadPath();
 });
 
@@ -904,6 +1102,47 @@ ipcMain.handle('get-diagnostics', (event, torrentId) => {
     diag.inboundPeak = diag.inboundPeak || 0;
   }
   return diag;
+});
+
+/**
+ * Memory, per process, plus what the torrent engine is costing.
+ *
+ * Exists because the failure mode this app actually has is not a crash — it is
+ * the main process growing until macOS compresses and swaps its pages, at which
+ * point everything beachballs. `app.getAppMetrics()` is the only way to see the
+ * renderer and GPU from in here, and its `memory.workingSetSize` is in KB.
+ *
+ * `scripts/mem-check.js` measures the same thing from outside with `top` and
+ * `vmmap`; this is the version the Net panel can poll.
+ */
+ipcMain.handle('get-metrics', () => {
+  const mem = process.memoryUsage();
+  let processes = [];
+  try {
+    processes = app.getAppMetrics().map((m) => ({
+      pid: m.pid,
+      type: m.type,
+      // KB in Electron's API; bytes everywhere else in this payload.
+      footprintBytes: (m.memory && m.memory.workingSetSize ? m.memory.workingSetSize : 0) * 1024,
+      cpuPercent: m.cpu ? m.cpu.percentCPUUsage : 0,
+    }));
+  } catch (_) {
+    /* metrics are best-effort; never let them break the panel */
+  }
+  return {
+    main: {
+      rssBytes: mem.rss,
+      heapUsedBytes: mem.heapUsed,
+      heapTotalBytes: mem.heapTotal,
+      externalBytes: mem.external,
+      // Buffers live here, not in the JS heap — which is where the piece caches
+      // and every wire's read/write buffer actually show up.
+      arrayBuffersBytes: mem.arrayBuffers,
+      maxEventLoopLagMs: Math.max(0, Math.round(maxLagMs)),
+    },
+    torrents: torrentService.getMemoryCost(),
+    processes: processes,
+  };
 });
 
 ipcMain.handle('retry-port-mapping', async () => {

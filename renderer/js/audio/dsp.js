@@ -85,6 +85,14 @@
         el.removeAttribute('src');
         el.load();
         src.disconnect();
+        // The analyser holds a 512-sample buffer and stays attached to the
+        // context's graph until it is disconnected — the source was released here
+        // and it was not. `probeRan` means this happens at most once per session,
+        // so it was a small permanent leak rather than a growing one, but the
+        // element↔source binding created above can never be undone (see the note
+        // on createMediaElementSource) and leaving the tail of the chain wired to
+        // it kept the whole probe alive for nothing.
+        analyser.disconnect();
       } catch (_) {}
     }
 

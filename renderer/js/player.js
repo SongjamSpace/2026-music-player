@@ -13,7 +13,12 @@
   var watchdog = null;
   var lastTimeAt = 0;
   var lastPositionSync = 0; // play head last reported to main, in seconds
-  var corsRetried = {}; // src → already retried without CORS, so we don't loop
+  // Not keyed by src, deliberately. The CORS parachute below calls
+  // MP.dsp.disableCrossOrigin(), which persists `corsOk: false` and makes
+  // wantCrossOrigin() return false for good — so `crossOrigin` is never set on a
+  // media element again and the retry can happen at most once per install. A map
+  // keyed on src implied otherwise while growing an entry per errored URL forever.
+  var corsRetried = false;
 
   var WATCHDOG_MS = 12000;
   var PREV_RESTART_THRESHOLD = 3; // seconds
@@ -514,8 +519,8 @@
       // effects chain, drop it and retry once. Losing the equaliser is a far
       // better outcome than losing playback, and this is the only place we'd
       // find out that the ACAO header didn't land.
-      if (media.crossOrigin && !corsRetried[media.currentSrc]) {
-        corsRetried[media.currentSrc] = true;
+      if (media.crossOrigin && !corsRetried) {
+        corsRetried = true;
         MP.dsp.disableCrossOrigin('media error code ' + code);
         var resumeAt = media.currentTime;
         media.removeAttribute('crossorigin');

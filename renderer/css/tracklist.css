@@ -437,6 +437,26 @@
   opacity: 1;
 }
 
+/*
+ * Skip layout, style and paint for album bodies that are scrolled out of view.
+ *
+ * The track list builds a real DOM row per file — a discography is 240 rows of
+ * ~10 elements each, all of which the browser was laying out and painting
+ * whether or not they were anywhere near the viewport. This does not reduce the
+ * node count (that needs real windowing), but it takes the per-frame cost of the
+ * offscreen ones to nearly nothing, and unlike windowing it leaves every node,
+ * listener and ARIA relationship exactly where it was.
+ *
+ * `contain-intrinsic-size: auto <n>px` is what keeps the scrollbar honest: the
+ * browser uses the estimate until a section has been rendered once, then
+ * remembers the real size. Without a value here, skipped sections would collapse
+ * to zero height and the scrollbar would jump as you scroll.
+ */
+.tgroup__body {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 400px;
+}
+
 .tgroup__body[hidden],
 .tgroup[hidden] {
   display: none;

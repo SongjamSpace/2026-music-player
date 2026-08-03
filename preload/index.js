@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('playerAPI', {
   setActiveTorrent: (torrentId) => ipcRenderer.invoke('set-active-torrent', torrentId),
 
   getDiagnostics: (torrentId) => ipcRenderer.invoke('get-diagnostics', torrentId),
+  getMetrics: () => ipcRenderer.invoke('get-metrics'),
   retryPortMapping: () => ipcRenderer.invoke('retry-port-mapping'),
 
   runNetPreflight: () => ipcRenderer.invoke('run-net-preflight'),
@@ -60,6 +61,7 @@ contextBridge.exposeInMainWorld('playerAPI', {
   onTorrentReady: subscribe('torrent-ready'),
   onTorrentProgress: subscribe('torrent-progress'),
   onRestoreMagnets: subscribe('restore-magnets'),
+  onLibraryUnavailable: subscribe('library-unavailable'),
   onTorrentError: subscribe('torrent-error'),
   onNatStatus: subscribe('nat-status'),
   onMenuCommand: subscribe('menu-command'),

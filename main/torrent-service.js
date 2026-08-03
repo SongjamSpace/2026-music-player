@@ -2,20 +2,28 @@ const WebTorrent = require('webtorrent');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const tuning = require('./tuning');
 
 const DEFAULT_DOWNLOAD_PATH = path.join(os.homedir(), 'Music', '2026-Music-Player');
 
 const AUDIO_RE = /\.(mp3|m4a|flac|ogg|oga|opus|aac|wav)$/i;
 
+/**
+ * Kept in step with IMAGE_EXTENSIONS in renderer/js/util.js.
+ *
+ * Used only to decide which files still get their progress reported in the file
+ * list — see _describeFiles. Cover art cannot be shown until its image file is
+ * complete (a partial stream in an <img> just hangs), and the renderer works that
+ * out from per-file progress. There are a handful of images per torrent against
+ * hundreds of audio files, so keeping these is nearly free while dropping the
+ * rest is the whole saving.
+ */
+const IMAGE_RE = /\.(jpg|jpeg|png|webp|gif|avif|bmp)$/i;
+
 // -- tuning ----------------------------------------------------------------
 
-/**
- * Per torrent, not client-wide: webtorrent's `_drain()` compares each torrent's
- * own connection count against `client.maxConns`. The library default of 55
- * binds on any healthy swarm; qBittorrent ships 100 per torrent. Watch for
- * EMFILE with several torrents live and drop this to 80 if it appears.
- */
-const MAX_CONNS = 120;
+/** See main/tuning.js — shared with scripts/library-cost-check.js. */
+const MAX_CONNS = tuning.MAX_CONNS;
 
 /**
  * Counter-intuitive, but capping upload makes downloads faster on an
@@ -27,7 +35,6 @@ const DEFAULT_UPLOAD_LIMIT = 1500000; // ~12 Mbps
 
 const MAX_WEB_CONNS = 10; // default 4 — archive.org web seeds are latency-bound
 const UPLOAD_SLOTS = 14; // default 10 rechoke slots; more reciprocation
-const STORE_CACHE_SLOTS = 64; // default 20 — LRU of whole pieces
 
 /**
  * Selection priorities for playback.
@@ -268,12 +275,27 @@ class TorrentService {
     return Promise.resolve();
   }
 
-  /** Shared add options for both the magnet and local-seed paths. */
-  _addOpts({ local, publicId }) {
+  /**
+   * Shared add options for both the magnet and local-seed paths.
+   *
+   * @param {object} opts
+   * @param {Buffer=} opts.metadata  The cached .torrent this add is using, when
+   *   there is one. Only needed for its piece length — see `storeCacheSlots`.
+   */
+  _addOpts({ local, publicId, metadata }) {
     // `announce: []` is not a tuning choice and stays in every profile: without
     // it, create-torrent injects its own default tracker list and a local-only
     // seed of the user's own files gets advertised to the public internet.
     if (BASELINE) return { path: this.downloadPath, announce: local ? [] : undefined };
+
+    // Priced in bytes rather than slots, because a slot holds a whole piece and
+    // piece lengths across a real library span 128 KB to 4 MB — so one flat slot
+    // count charges a 16x spread nobody chose. A first-time magnet has no cached
+    // metadata and so gets the floor: it cannot be corrected later (the store is
+    // built before 'metadata' fires), but it is right from the next launch on,
+    // once the .torrent is cached.
+    const pieceLength = tuning.pieceLengthFromTorrentFile(metadata);
+
     return {
       path: this.downloadPath,
       fileModtimes: this._readCachedModtimes(publicId),
@@ -281,7 +303,7 @@ class TorrentService {
       strategy: 'sequential',
       maxWebConns: MAX_WEB_CONNS,
       uploads: UPLOAD_SLOTS,
-      storeCacheSlots: STORE_CACHE_SLOTS,
+      storeCacheSlots: tuning.storeCacheSlots(pieceLength),
       // A local seed is deliberately not advertised anywhere.
       announce: local || !this.trackers ? [] : this.trackers.list(),
     };
@@ -317,6 +339,16 @@ class TorrentService {
   }
 
   /**
+   * The infohash webtorrent actually knows this torrent by, which differs from
+   * the library id whenever the album was seeded from disk. Needed by callers
+   * that key their own state on the real hash and have to clean it up *after*
+   * removal has already discarded the alias.
+   */
+  realInfoHash(publicId) {
+    return this.aliases.get(publicId) || String(publicId || '').toLowerCase() || null;
+  }
+
+  /**
    * Whether we actually know this torrent's file list. `has()` is true the
    * instant a magnet is added, long before any peer supplies metadata — so the
    * two are very different questions and conflating them hides stuck torrents.
@@ -336,16 +368,36 @@ class TorrentService {
 
   // -- shared wiring -------------------------------------------------------
 
+  /**
+   * The file list the renderer renders from.
+   *
+   * `progress` is omitted for audio and everything else. It looks like a free
+   * field and is not: `file.progress` walks every piece of the file against the
+   * bitfield, so filling it in for a whole library costs O(all pieces of all
+   * files) — and the renderer treats it only as a stale fallback anyway
+   * (renderer/js/store.js `fileProgress()` prefers the tick's authoritative
+   * `fileProgress` array). Whoever needs live per-file numbers goes through
+   * `_fileProgressFor`, which is memoised and scoped to the torrent on screen.
+   *
+   * Images are the exception, and deliberately so. Cover art is only shown once
+   * its file is complete, and the torrent whose art is on screen is not always
+   * the torrent on screen — the transport shows the *playing* album's cover while
+   * you browse a different one. Scoping progress to the selected torrent alone
+   * would silently break art in exactly that case. There are a few images per
+   * torrent, so this costs almost nothing.
+   */
   _describeFiles(torrent, baseUrl) {
-    return torrent.files.map((file, index) => ({
-      name: file.name,
-      path: file.path,
-      length: file.length,
-      streamURL: `${baseUrl}/${index}/${encodeURIComponent(file.name)}`,
-      type: file.type || 'application/octet-stream',
-      progress: file.progress,
-      downloaded: file.downloaded,
-    }));
+    return torrent.files.map((file, index) => {
+      const out = {
+        name: file.name,
+        path: file.path,
+        length: file.length,
+        streamURL: `${baseUrl}/${index}/${encodeURIComponent(file.name)}`,
+        type: file.type || 'application/octet-stream',
+      };
+      if (IMAGE_RE.test(file.name)) out.progress = file.progress;
+      return out;
+    });
   }
 
   // -- progress reporting ----------------------------------------------------
@@ -361,9 +413,38 @@ class TorrentService {
   // numbers only for the torrent actually on screen, only every fourth tick,
   // and never again for a file that has already finished.
 
-  /** @param {string|null} publicId  The torrent whose file list is on screen. */
+  /**
+   * @param {string|null} publicId  The torrent whose file list is on screen.
+   *
+   * Pushes one immediate per-file update for the new selection. Without it the
+   * newly-shown tracklist would wait up to FILE_PROGRESS_EVERY ticks for its
+   * first real numbers — which was masked before only because every payload
+   * carried per-file progress for everything, at the cost this whole change is
+   * about.
+   */
   setActiveTorrent(publicId) {
+    if (this.activeTorrentId === publicId) return;
     this.activeTorrentId = publicId;
+    if (!publicId) return;
+
+    const entry = this.reporters.get(publicId);
+    const t = this._get(publicId);
+    if (!entry || !t || t.destroyed) return;
+    try {
+      entry.onProgress({
+        id: publicId,
+        progress: t.progress,
+        numPeers: t.numPeers,
+        downloadSpeed: t.downloadSpeed,
+        uploadSpeed: t.uploadSpeed,
+        timeRemaining: t.timeRemaining,
+        downloaded: t.downloaded,
+        length: t.length,
+        fileProgress: this._fileProgressFor(publicId, t),
+      });
+    } catch (err) {
+      console.error('[torrent] selection progress push failed for', publicId, '-', err.message);
+    }
   }
 
   _fileProgressFor(publicId, torrent) {
@@ -464,7 +545,10 @@ class TorrentService {
         downloadSpeed: t.downloadSpeed,
         timeRemaining: t.timeRemaining,
         done: t.done,
-        fileProgress: this._fileProgressFor(publicId, t),
+        // Only for the torrent on screen. This fires once per torrent, but at
+        // boot "once per torrent" is the whole library at once, which is how the
+        // O(all pieces) walk got onto the startup path in the first place.
+        fileProgress: publicId === this.activeTorrentId ? this._fileProgressFor(publicId, t) : null,
       });
 
       // A torrent restored from cached metadata with its files already on disk
@@ -497,7 +581,7 @@ class TorrentService {
 
     // webtorrent concatenates opts.announce onto whatever the magnet already
     // carries and dedupes the result, so this augments rather than replaces.
-    const opts = this._addOpts({ local: !!local, publicId });
+    const opts = this._addOpts({ local: !!local, publicId, metadata: exact || local });
 
     return new Promise((resolve, reject) => {
       let resolved = false;
@@ -553,6 +637,9 @@ class TorrentService {
         // new swarm, just reading the user's own files.
         const torrent = this.client.seed(
           folderPath,
+          // No `metadata`: create-torrent picks the piece length here, so there is
+          // nothing to read it from yet. The cached .local.torrent written below
+          // supplies it on every later launch.
           Object.assign(this._addOpts({ local: true, publicId }), { path: path.dirname(folderPath) }),
           (t) => {
             this.aliases.set(publicId, t.infoHash);
@@ -577,23 +664,41 @@ class TorrentService {
   _fileListWithStreamUrls(torrent, publicId) {
     const baseUrl = this.torrentServerUrls.get(publicId);
     if (!baseUrl) {
-      return torrent.files.map((f) => ({
-        name: f.name,
-        path: f.path,
-        length: f.length,
-        streamURL: null,
-        type: f.type || 'application/octet-stream',
-        progress: f.progress,
-        downloaded: f.downloaded,
-      }));
+      // Same omission as _describeFiles, and for the same reason.
+      return torrent.files.map((f) => {
+        const out = {
+          name: f.name,
+          path: f.path,
+          length: f.length,
+          streamURL: null,
+          type: f.type || 'application/octet-stream',
+        };
+        if (IMAGE_RE.test(f.name)) out.progress = f.progress;
+        return out;
+      });
     }
     return this._describeFiles(torrent, baseUrl);
   }
 
+  /**
+   * The boot snapshot the renderer builds its whole world from.
+   *
+   * Per-file progress used to be computed here for every file of every torrent,
+   * which is the single most expensive thing this process did: `file.progress`
+   * walks the file's pieces against the bitfield, so a library of eleven
+   * torrents meant ~1,000 bitfield walks in one synchronous burst, at the exact
+   * moment the user is waiting for the window. The steady-state ticker goes to
+   * real trouble to avoid that (active torrent only, every fourth tick, memoised
+   * for finished files) and this path simply bypassed it.
+   *
+   * Now only the on-screen torrent gets it. Everything else reports `null`, and
+   * the renderer's fallback reads that as "not known yet" rather than "zero".
+   */
   getTorrents() {
     if (!this.client) return [];
     return this.client.torrents.map((torrent) => {
       const publicId = this.publicIds.get(torrent.infoHash) || torrent.infoHash;
+      const isActive = publicId === this.activeTorrentId;
       return {
         id: publicId,
         name: torrent.name,
@@ -604,7 +709,7 @@ class TorrentService {
         downloadSpeed: torrent.downloadSpeed,
         timeRemaining: torrent.timeRemaining,
         done: torrent.done,
-        fileProgress: torrent.files.map((f) => ({ progress: f.progress, downloaded: f.downloaded })),
+        fileProgress: isActive ? this._fileProgressFor(publicId, torrent) : null,
       };
     });
   }
@@ -719,6 +824,63 @@ class TorrentService {
     }
     if (now > this.inboundPeak) this.inboundPeak = now;
     return now;
+  }
+
+  /**
+   * What the torrent engine is costing in memory right now.
+   *
+   * Separate from getDiagnostics because that answers "why is this slow to
+   * download" and this answers "why is this process 2 GB". They get read at
+   * different times and the memory one has to stay cheap enough to poll.
+   *
+   * `predictedCacheBytes` is a ceiling, not a reading — the LRU may not be full.
+   * It is still the number worth watching, because it is the one that used to
+   * grow silently with every album added.
+   */
+  getMemoryCost() {
+    const client = this.client;
+    if (!client) {
+      return {
+        liveTorrents: 0,
+        totalWires: 0,
+        predictedCacheBytes: 0,
+        startedPieces: 0,
+        startedPieceBytes: 0,
+        torrents: [],
+      };
+    }
+    const torrents = client.torrents.map((t) => ({
+      id: this.publicIds.get(t.infoHash) || t.infoHash,
+      name: t.name || null,
+      wires: (t.wires && t.wires.length) || 0,
+      pieceLength: t.pieceLength || 0,
+      numPieces: (t.pieces && t.pieces.length) || 0,
+      slots: t._storeCacheSlots != null ? t._storeCacheSlots : null,
+      // Pieces that have been *started* and not yet completed.
+      //
+      // This is the number that explains native memory growth, and it is
+      // deliberately not "incomplete pieces": torrent-piece allocates `_buffer`
+      // lazily in init() and webtorrent nulls the whole Piece out on verify
+      // (torrent.js:641, :1717), so a piece only costs memory once a block has
+      // actually arrived for it. Those buffers hold 16 KB blocks outside the JS
+      // heap — which is why the heap can sit flat while the process grows.
+      //
+      // It climbs when the picker keeps starting pieces it doesn't finish.
+      startedPieces: (t.pieces || []).reduce((n, p) => n + (p && p._buffer ? 1 : 0), 0),
+      startedPieceBytes: (t.pieces || []).reduce(
+        (n, p) => n + (p && p._buffer ? p.length - p.missing : 0),
+        0
+      ),
+      cacheBytes: tuning.storeCacheBytes(t.pieceLength || 0, (t.pieces && t.pieces.length) || 0),
+    }));
+    return {
+      liveTorrents: torrents.length,
+      totalWires: torrents.reduce((n, t) => n + t.wires, 0),
+      predictedCacheBytes: torrents.reduce((n, t) => n + t.cacheBytes, 0),
+      startedPieces: torrents.reduce((n, t) => n + t.startedPieces, 0),
+      startedPieceBytes: torrents.reduce((n, t) => n + t.startedPieceBytes, 0),
+      torrents: torrents,
+    };
   }
 
   getDiagnostics(torrentId) {

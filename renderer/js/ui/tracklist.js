@@ -6,6 +6,11 @@
   var currentId = null;
   var unsubProgress = null;
   var focusedIndex = 0;
+  // Which row currently carries the selection, so it can be cleared without
+  // walking every row. null means nothing is selected.
+  var selectedIndex = null;
+  // Which row currently shows as playing, for the same reason.
+  var playingIndex = null;
   var skeletonCaption = null;
   var skeletonStartedAt = 0;
   var renderedCount = -1; // file count the current DOM reflects
@@ -132,6 +137,10 @@
     rows.clear();
     groups.clear();
     groupOf.clear();
+    invalidateVisible();
+    // The rows these pointed at no longer exist.
+    selectedIndex = null;
+    playingIndex = null;
   }
 
   /**
@@ -145,6 +154,11 @@
    * moment the field is cleared.
    */
   function applyFilter() {
+    // The one choke point for every visibility change — row filtering and group
+    // collapse both land here — so it is the only place the visible-index cache
+    // needs invalidating.
+    invalidateVisible();
+
     var q = MP.store.state.ui.filter.trim().toLowerCase();
     var collapsed = collapsedSet(currentId);
     var hits = new Map();
@@ -278,14 +292,14 @@
        * the 1 Hz tick doesn't touch the DOM for nothing.
        */
       updateProgress: function (force) {
+        // `bytes` above is the same sum, computed once when the group was built —
+        // the total cannot change without the list being rebuilt, so recomputing
+        // it per tick was pure waste.
         var got = 0;
-        var total = 0;
         info.indices.forEach(function (i) {
-          var len = (torrent.files[i] || {}).length || 0;
-          total += len;
-          got += MP.store.fileProgress(torrent.id, i) * len;
+          got += MP.store.fileProgress(torrent.id, i) * ((torrent.files[i] || {}).length || 0);
         });
-        var pct = total ? Math.round((got / total) * 100) : 0;
+        var pct = bytes ? Math.round((got / bytes) * 100) : 0;
         if (!force && pct === lastPct) return;
         lastPct = pct;
         var right = pct >= 100 ? 'Downloaded' : pct === 0 ? 'Queued' : pct + '%';
@@ -299,17 +313,42 @@
     return api;
   }
 
-  function refreshProgress() {
+  // The last fileProgress array we painted from, by identity. The store carries
+  // the previous array forward unchanged whenever a tick omits per-file numbers
+  // (which is three ticks in four, and all ticks for a torrent that isn't on
+  // screen), so reference equality is an exact test for "nothing to repaint".
+  var paintedFileProgress = null;
+
+  function refreshProgress(torrent) {
+    // Rows and group headers each walk every file, so an unguarded refresh was
+    // two full passes over the whole tracklist per second — computing, on most
+    // ticks, numbers identical to the ones already on screen. The per-row lastPct
+    // guards suppressed the DOM writes but not any of the work.
+    var fp = torrent && torrent.fileProgress;
+    if (fp && fp === paintedFileProgress) return;
+    paintedFileProgress = fp || null;
+
     rows.forEach(function (row) { row.updateProgress(); });
     groups.forEach(function (g) { g.updateProgress(); });
   }
 
   function paintPlaying() {
     var pb = MP.store.state.playback;
-    rows.forEach(function (row) {
-      var isCurrent = pb.torrentId === currentId && pb.fileIndex === row.index;
-      row.setPlaying(isCurrent, !pb.isPlaying);
-    });
+    var nowPlaying =
+      pb.torrentId === currentId && pb.fileIndex != null ? pb.fileIndex : null;
+
+    // Two rows at most, not all of them. This fires on every track change *and*
+    // every play/pause, and the all-rows version made a pause into an O(n) style
+    // invalidation over the whole list.
+    if (playingIndex !== null && playingIndex !== nowPlaying) {
+      var prev = rows.get(playingIndex);
+      if (prev) prev.setPlaying(false, !pb.isPlaying);
+    }
+    if (nowPlaying !== null) {
+      var row = rows.get(nowPlaying);
+      if (row) row.setPlaying(true, !pb.isPlaying);
+    }
+    playingIndex = nowPlaying;
 
     // Open the album that's playing. Pressing Play on a collapsed section and
     // having it stay shut — with no visible sign of which track started —
@@ -427,7 +466,11 @@
     if (plan.grouped) applyCollapsePolicy(id, plan);
 
     if (first !== null) rows.get(first).setSelected(true);
+    selectedIndex = first;
     focusedIndex = first === null ? 0 : first;
+    // A fresh list has nothing painted yet, so the identity guard in
+    // refreshProgress must not short-circuit the first paint.
+    paintedFileProgress = null;
     applyFilter();
     paintPlaying();
     unsubProgress = MP.store.subscribe('torrent:progress:' + id, refreshProgress);
@@ -535,8 +578,16 @@
       collapsedSet(currentId).delete(g.key);
       applyFilter();
     }
-    rows.forEach(function (r) { r.setSelected(false); });
+    // Clear exactly the row that was selected rather than sweeping all of them.
+    // This runs on every click and every arrow key, and each setSelected() does a
+    // class toggle plus a setAttribute and a tabIndex write — so at 242 rows a
+    // single arrow press was ~242 style invalidations to move one highlight.
+    if (selectedIndex !== null && selectedIndex !== index) {
+      var prev = rows.get(selectedIndex);
+      if (prev) prev.setSelected(false);
+    }
     row.setSelected(true);
+    selectedIndex = index;
     focusedIndex = index;
     row.el.focus();
     row.el.scrollIntoView({ block: 'nearest' });
@@ -549,14 +600,28 @@
    * collapsed album must be skipped whole, which a sorted list of file indices
    * cannot express. Reading the DOM also keeps navigation honest for free if
    * the visual order ever stops matching file order.
+   *
+   * Cached, because this is called on every arrow key and every typeahead
+   * keystroke, and the uncached version ran querySelectorAll over the whole list
+   * and allocated a fresh array each time. Invalidated by anything that can
+   * change what is on screen: render(), the filter, and collapse toggles — see
+   * invalidateVisible().
    */
+  var visibleCache = null;
+
+  function invalidateVisible() {
+    visibleCache = null;
+  }
+
   function visibleIndices() {
+    if (visibleCache) return visibleCache;
     var out = [];
     var nodes = listEl.querySelectorAll('.track-row');
     for (var i = 0; i < nodes.length; i++) {
       if (!isRowVisible(nodes[i])) continue;
       out.push(Number(nodes[i].dataset.index));
     }
+    visibleCache = out;
     return out;
   }
 
@@ -667,7 +732,18 @@
     MP.store.subscribe('durations', function () {
       rows.forEach(function (r) { r.updateLength(); });
     });
-    MP.store.subscribe('torrents:list', function () {
+    MP.store.subscribe('torrents:list', function (order) {
+      // Browsing state for torrents that no longer exist. Small per entry, but it
+      // is keyed by torrent id and nothing ever released it, so it grew for the
+      // life of the window every time an album was removed.
+      var live = new Set(order || []);
+      collapsedByTorrent.forEach(function (_, id) {
+        if (!live.has(id)) collapsedByTorrent.delete(id);
+      });
+      touchedTorrents.forEach(function (id) {
+        if (!live.has(id)) touchedTorrents.delete(id);
+      });
+
       // Metadata arriving is what turns the skeleton into a real list.
       var t = currentId ? MP.store.getTorrent(currentId) : null;
       var count = t && t.files ? t.files.length : 0;

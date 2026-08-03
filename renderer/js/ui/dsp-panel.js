@@ -6,6 +6,9 @@
   var btn = null;
   var body = null;
   var bandsWrap = null;
+  // Per-band element references, cached by renderBands() so syncBandInputs()
+  // doesn't have to re-query the DOM on every emit. Index matches band index.
+  var bandRefs = [];
   var presetSelect = null;
   var banner = null;
   var open = false;
@@ -149,6 +152,12 @@
 
   function renderBands() {
     bandsWrap.textContent = '';
+    // Rebuilt alongside the rows. syncBandInputs runs on every `dsp:state` emit,
+    // which during an EQ drag is once per pointermove — and it was re-finding
+    // every element by selector each time: one querySelectorAll for the rows plus
+    // one more *per row* for its inputs. All of these nodes are right here at
+    // build time, so keep them.
+    bandRefs = [];
 
     var head = el('div', 'dsp__band-head');
     ['', 'Type', 'Freq', 'Gain', 'Q', ''].forEach(function (t) {
@@ -219,6 +228,7 @@
       row.appendChild(q);
       row.appendChild(remove);
       bandsWrap.appendChild(row);
+      bandRefs.push({ row: row, type: type, freq: freq, gain: gain, q: q });
     });
 
     var add = el('button', 'btn btn--ghost', 'Add band');
@@ -261,26 +271,35 @@
 
   function selectBand(index) {
     selectedBand = index;
-    Array.prototype.forEach.call(bandsWrap.querySelectorAll('.dsp__band'), function (row) {
-      row.classList.toggle('is-selected', Number(row.dataset.index) === index);
-    });
+    for (var i = 0; i < bandRefs.length; i++) {
+      bandRefs[i].row.classList.toggle('is-selected', i === index);
+    }
     if (MP.eqCanvas) MP.eqCanvas.select(index);
   }
 
-  /** Refresh band inputs without rebuilding — used when the canvas drives changes. */
+  /**
+   * Refresh band inputs without rebuilding — used when the canvas drives changes.
+   *
+   * Reads from `bandRefs`, cached by renderBands(), rather than re-querying the
+   * DOM: this is called once per pointermove of an EQ drag.
+   */
   function syncBandInputs() {
-    var rows = bandsWrap.querySelectorAll('.dsp__band');
+    var active = document.activeElement;
     s().eq.bands.forEach(function (band, i) {
-      var row = rows[i];
-      if (!row) return;
-      var inputs = row.querySelectorAll('.dsp__num');
-      if (document.activeElement !== inputs[0]) inputs[0].value = String(Math.round(band.f));
-      if (document.activeElement !== inputs[1]) inputs[1].value = String(round(band.g, 0.1));
-      if (document.activeElement !== inputs[2]) inputs[2].value = String(round(band.q, 0.05));
-      var select = row.querySelector('select');
-      if (select && select.value !== band.type) select.value = band.type;
-      inputs[1].disabled = !!D.GAINLESS_TYPES[band.type];
-      row.classList.toggle('is-selected', i === selectedBand);
+      var ref = bandRefs[i];
+      if (!ref) return;
+      var f = String(Math.round(band.f));
+      var gv = String(round(band.g, 0.1));
+      var qv = String(round(band.q, 0.05));
+      // Guarded on the value as well as focus — assigning an input's value is a
+      // real DOM write even when it changes nothing.
+      if (active !== ref.freq && ref.freq.value !== f) ref.freq.value = f;
+      if (active !== ref.gain && ref.gain.value !== gv) ref.gain.value = gv;
+      if (active !== ref.q && ref.q.value !== qv) ref.q.value = qv;
+      if (ref.type.value !== band.type) ref.type.value = band.type;
+      var gainDisabled = !!D.GAINLESS_TYPES[band.type];
+      if (ref.gain.disabled !== gainDisabled) ref.gain.disabled = gainDisabled;
+      ref.row.classList.toggle('is-selected', i === selectedBand);
     });
   }
 

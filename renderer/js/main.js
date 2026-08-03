@@ -25,6 +25,32 @@
       MP.toast.error(message);
     });
 
+    // Main refused to bring the library up because it could not confirm the
+    // download root is the real one. Nothing has been added and nothing will be:
+    // the alternative is webtorrent seeing every album at 0% and re-downloading
+    // the entire library over the swarm.
+    MP.api.on('library-unavailable', function (info) {
+      var where = (info && info.path) || 'your download folder';
+      var reason = info && info.reason;
+      var message =
+        reason === 'missing'
+          ? 'Your music library isn’t there: ' + where + '. If it’s on an external drive, connect it and reopen the app.'
+          : reason === 'mismatch'
+            ? 'The folder at ' + where + ' isn’t the library this app set up. If your drive remounted under a different name, pick the right folder in Settings.'
+            : reason === 'unwritable'
+              ? 'Can’t write to ' + where + '. If it’s on an external drive, check the drive is connected and not read-only.'
+              : reason === 'unstamped'
+                ? 'Couldn’t confirm ' + where + ' is your library folder. Connect the right drive, or re-pick the folder in Settings to confirm it.'
+                : 'The folder at ' + where + ' is empty, so the drive holding your music probably isn’t connected.';
+
+      // The banner is the persistent half of this — it stays until dismissed.
+      // The toast is just what makes it noticed, and carries the way out.
+      MP.tracklist.showBanner(message);
+      MP.toast.error('Music library not available — nothing was loaded.', {
+        action: { label: 'Open Settings', onClick: function () { MP.dialogs.openSettings(); } },
+      });
+    });
+
     MP.api.on('restore-magnets', function (magnets) {
       if (!Array.isArray(magnets) || !magnets.length) return;
       magnets.forEach(function (magnet) {

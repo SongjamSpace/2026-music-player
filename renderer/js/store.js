@@ -264,11 +264,12 @@
     if (state.durations.get(key) === seconds) return;
     state.durations.set(key, seconds);
     emit('durations', key);
-    if (persistDurations) {
-      var plain = {};
-      state.durations.forEach(function (v, k) { plain[k] = v; });
-      persistDurations(plain);
-    }
+    // Serialising happens inside the debounced callback, not here. Building the
+    // plain object on every insert meant walking the whole Map per learned
+    // duration — and durations are learned in a burst as a tracklist loads, so
+    // the debounce was throttling the write while the work it existed to avoid
+    // ran anyway, once per track.
+    if (persistDurations) persistDurations();
   }
 
   // Assigned by _initDurationPersistence() at boot, once MP.util exists.
@@ -295,7 +296,9 @@
     setDuration: setDuration,
     setFilter: setFilter,
     _initDurationPersistence: function () {
-      persistDurations = window.MP.util.debounce(function (plain) {
+      persistDurations = window.MP.util.debounce(function () {
+        var plain = {};
+        state.durations.forEach(function (v, k) { plain[k] = v; });
         window.playerAPI.setPref('durations', plain);
       }, 2000);
     },
