@@ -114,7 +114,12 @@
     var t = MP.store.getTorrent(torrentId);
     if (!t || !t.files || !t.files[fileIndex]) return;
     var file = t.files[fileIndex];
-    if (!file.streamURL) {
+    // `localURL` reads the finished file straight off disk; `streamURL` goes
+    // through webtorrent's piece store and needs the torrent live. Preferring the
+    // local one is what makes a downloaded album playable without the torrent
+    // engine being involved at all.
+    var src = file.localURL || file.streamURL;
+    if (!src) {
       MP.toast.error('This file has no stream URL yet — the torrent may still be starting up.');
       return;
     }
@@ -159,10 +164,10 @@
     if (MP.dsp.wantCrossOrigin()) active.crossOrigin = 'anonymous';
     else active.removeAttribute('crossorigin');
 
-    active.src = file.streamURL;
+    active.src = src;
     // Always reached from a user gesture, which is the only place an
     // AudioContext can be created in a running state.
-    MP.dsp.onPlay(file.streamURL);
+    MP.dsp.onPlay(src);
     applyVolume();
     active.play().catch(function (err) {
       // Autoplay rejection is benign here (user-gesture initiated), but a

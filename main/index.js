@@ -18,6 +18,7 @@ const {
 } = require('./torrent-service');
 const { createTrackers } = require('./trackers');
 const { createPiecePolicy } = require('./piece-policy');
+const { createFileServer } = require('./file-server');
 const nat = require('./nat');
 const netPath = require('./net-path');
 const swarmProbe = require('./swarm-probe');
@@ -222,6 +223,19 @@ function rotateCrashLog() {
 
 const store = new Store();
 const torrentService = new TorrentService();
+
+/**
+ * Serves media and artwork that is already on disk, bypassing webtorrent.
+ *
+ * Path resolution is injected rather than imported so the server has no
+ * dependency on the torrent engine — which is what lets scripts/range-check.js
+ * exercise it without Electron, and what will let it keep working for archived
+ * albums that have no live torrent at all.
+ */
+const fileServer = createFileServer({
+  resolveMedia: (albumId, index) => torrentService.resolveMediaLocation(albumId, index),
+});
+
 const piecePolicy = createPiecePolicy({
   service: torrentService,
   getPrefs: () => getPrefs(),
@@ -536,6 +550,16 @@ app.whenReady().then(async () => {
   installStreamCorsHeaders();
   torrentService.setCacheDir(path.join(app.getPath('userData'), 'torrents'));
 
+  // Before the torrent client, so the very first file list can already carry local
+  // URLs. Failing to listen is not fatal — every use site falls back to streaming
+  // through webtorrent, which is what happened before this existed.
+  try {
+    await fileServer.start();
+    torrentService.localUrlFor = (publicId, index) => fileServer.mediaUrl(publicId, index);
+  } catch (err) {
+    recordError('local file server', err);
+  }
+
   const listen = await resolveTorrentPort();
   portFallback = listen.fellBack ? listen.preferred : null;
   await torrentService.start({
@@ -622,6 +646,14 @@ async function shutdown() {
     torrentService.destroy();
   } catch (err) {
     console.warn('[shutdown] torrent teardown:', err.stack || err.message);
+  }
+  // After the torrents, so an in-flight read cannot be cut off mid-write, and in
+  // its own try: a failure here must not be able to skip clearSessionFlag() below,
+  // or the next launch reports a crash that did not happen.
+  try {
+    await fileServer.stop();
+  } catch (err) {
+    console.warn('[shutdown] file server:', err.message);
   }
   // Last thing, and only on the path that ran teardown: the absence of this
   // file is the entire signal that the previous session exited cleanly.

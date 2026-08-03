@@ -78,6 +78,16 @@ class TorrentService {
 
     this.trackers = null; // set by start(); see main/trackers.js
 
+    /**
+     * `(publicId, index) => url | null` for a file already complete on disk.
+     *
+     * Injected by main/index.js from main/file-server.js rather than required
+     * here, so the service does not depend on the server and the server does not
+     * depend on webtorrent. Null until the server is listening, which is why every
+     * use site treats a missing local URL as "fall back to the torrent stream".
+     */
+    this.localUrlFor = null;
+
     // Playback priority selections, tracked so they can actually be undone.
     // real infoHash -> Map<fileIndex, {from, to, priority}>
     this.selectionState = new Map();
@@ -387,6 +397,10 @@ class TorrentService {
    * torrent, so this costs almost nothing.
    */
   _describeFiles(torrent, baseUrl) {
+    const publicId = this.publicIds.get(torrent.infoHash) || torrent.infoHash;
+    // O(1), and true for a fully downloaded album — which is the case that makes
+    // the local URL worth having at all.
+    const allComplete = !!torrent.done;
     return torrent.files.map((file, index) => {
       const out = {
         name: file.name,
@@ -395,7 +409,17 @@ class TorrentService {
         streamURL: `${baseUrl}/${index}/${encodeURIComponent(file.name)}`,
         type: file.type || 'application/octet-stream',
       };
-      if (IMAGE_RE.test(file.name)) out.progress = file.progress;
+      const isImage = IMAGE_RE.test(file.name);
+      if (isImage) out.progress = file.progress;
+      // Read straight off disk when the bytes are already there. This is what
+      // decouples playback from the torrent being live: the renderer prefers this
+      // URL, and it does not go through webtorrent's piece store at all.
+      //
+      // Images can use their own progress, which was just computed above anyway —
+      // so a cover resolves from disk even on a partial torrent that isn't the one
+      // on screen, which is exactly the case the transport needs.
+      const complete = allComplete || (isImage ? out.progress >= 1 : this.isFileComplete(publicId, index));
+      if (this.localUrlFor && complete) out.localURL = this.localUrlFor(publicId, index);
       return out;
     });
   }
@@ -712,6 +736,43 @@ class TorrentService {
         fileProgress: isActive ? this._fileProgressFor(publicId, torrent) : null,
       };
     });
+  }
+
+  /**
+   * Where a track lives on disk, for the local file server.
+   *
+   * Returns the download root and the torrent-relative path separately rather than
+   * a joined absolute path, so the server can prove the result stays inside the
+   * root — a torrent's file paths come from its metadata, and `..` in there is a
+   * known bad-torrent trick.
+   *
+   * @returns {{root: string, relPath: string}|null}
+   */
+  resolveMediaLocation(publicId, index) {
+    const t = this._get(publicId);
+    if (!t || !t.path || !t.files) return null;
+    const file = t.files[index];
+    if (!file) return null;
+    return { root: t.path, relPath: file.path };
+  }
+
+  /**
+   * Whether this file is known complete without walking its pieces.
+   *
+   * `torrent.done` is O(1) and covers the case that matters — a fully downloaded
+   * album, which is most of the library. Otherwise fall back to the memo that
+   * `_fileProgressFor` already maintains for finished files, which is populated for
+   * whichever torrent is on screen. Anything else reports false: offering a local
+   * URL for a partially written file would play silence or noise, so the bar is
+   * "known complete", not "probably complete".
+   */
+  isFileComplete(publicId, index) {
+    const t = this._get(publicId);
+    if (!t) return false;
+    if (t.done) return true;
+    const memo = this.fileProgressCache.get(publicId);
+    const entry = memo && memo[index];
+    return !!(entry && entry.progress >= 1);
   }
 
   /** Absolute on-disk paths of complete audio files, for tag/artwork reading. */

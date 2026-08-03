@@ -2,7 +2,16 @@
 'use strict';
 
 /**
- * Patches two busy-wait loops in bittorrent-protocol that freeze the app.
+ * Patches bugs in the webtorrent dependency tree that break this app.
+ *
+ * Every patch here is exact-match and idempotent: if a dependency upgrade changes
+ * the code being patched, the script fails loudly rather than silently leaving the
+ * app broken.
+ *
+ *   node scripts/patch-deps.js
+ *   node scripts/patch-deps.js --check   # verify only, exit 1 if unpatched
+ *
+ * -- 1. bittorrent-protocol: two busy-wait loops that freeze the app -----------
  *
  * Upstream, both the incoming and outgoing MSE/PE handshake paths do this:
  *
@@ -34,24 +43,53 @@
  * drain loop (see _onFinish) — it does not depend on 'finish' being emitted
  * synchronously by destroy().
  *
- * Idempotent, and exact-match: if a dependency upgrade changes this code the
- * script fails loudly rather than silently leaving the app unpatched.
+ * -- 2. webtorrent rarity-map: throws during shutdown --------------------------
  *
- *   node scripts/patch-deps.js
- *   node scripts/patch-deps.js --check   # verify only, exit 1 if unpatched
+ * `RarityMap.destroy()` cleans up each wire and then nulls all of its own state:
+ *
+ *     this._torrent.wires.forEach(wire => { this._cleanupWireEvents(wire) })
+ *     this._torrent = null
+ *     this._pieces = null
+ *     this._onWireHave = null
+ *     this._onWireBitfield = null
+ *
+ * But every wire also carries a `once('close')` handler, installed by
+ * `_initWire`, which uses that state. Wires close *after* destroy() during
+ * teardown, so the handler runs against a fully-nulled map and throws. Observed
+ * on every quit:
+ *
+ *     [shutdown] torrent teardown: TypeError [ERR_INVALID_ARG_TYPE] …
+ *       at RarityMap._cleanupWireEvents (rarity-map.js:101)
+ *       at wire._onClose (rarity-map.js:76)
+ *       at Wire.destroy (bittorrent-protocol/index.js:191)
+ *       at Torrent.removePeer (webtorrent/lib/torrent.js:958)
+ *
+ * The throw escapes into `torrentService.destroy()` and aborts teardown partway,
+ * so the remaining torrents are never cleanly destroyed and their stores never
+ * flushed — on an app whose data lives on an external drive.
+ *
+ * The guard belongs in `_onClose`, not in `_cleanupWireEvents`. Guarding only the
+ * listener removal was tried first and was not enough: it moved the failure one
+ * line down to `this._pieces[i] -= …`, which is null for the same reason. Bailing
+ * out of the whole handler covers both, and is correct — there is nothing
+ * meaningful for a destroyed availability map to do when a wire closes.
+ * `_cleanupWireEvents` called directly from destroy() is unaffected, because at
+ * that point the handlers have not been nulled yet.
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const MARK = 'MP-PATCH: busy-wait removed';
+const MARK = 'MP-PATCH';
 
-const TARGET = path.join(__dirname, '..', 'node_modules', 'bittorrent-protocol', 'index.js');
+function dep() {
+  return path.join(__dirname, '..', 'node_modules');
+}
 
-function guard(after, next) {
+function busyWaitGuard(after, next) {
   return (
     `      ${after}\n` +
-    `      // ${MARK} — see scripts/patch-deps.js.\n` +
+    `      // ${MARK}: busy-wait removed — see scripts/patch-deps.js.\n` +
     `      // Upstream spins here on \`while (!this._setGenerators) {}\`. That flag is\n` +
     `      // only set synchronously by the handler for the event just emitted above;\n` +
     `      // when the handler declines to answer (webtorrent's conn-pool destroys an\n` +
@@ -66,59 +104,110 @@ function guard(after, next) {
   );
 }
 
-/** [description, exact text to find, replacement]. */
-const EDITS = [
-  [
-    '_parsePe2 (outgoing handshake)',
-    '      this._onPe2(pubKey)\n' +
-      '      while (!this._setGenerators) {\n' +
-      '        // Wait until generators have been set\n' +
-      '      }\n' +
-      '      this._parsePe4()',
-    guard('this._onPe2(pubKey)', 'this._parsePe4()'),
-  ],
-  [
-    '_parsePe3 (incoming handshake — the one that froze the app)',
-    '      this._onPe3(buffer)\n' +
-      '      while (!this._setGenerators) {\n' +
-      '        // Wait until generators have been set\n' +
-      '      }\n' +
-      '      this._parsePe3Encrypted()',
-    guard('this._onPe3(buffer)', 'this._parsePe3Encrypted()'),
-  ],
+/**
+ * One entry per file, each with its own exact-match edits.
+ *
+ * `expected` is the number of MARK occurrences a fully patched file has, so the
+ * --check path can tell "patched" from "half patched" without re-matching.
+ */
+const TARGETS = [
+  {
+    label: 'bittorrent-protocol',
+    file: path.join(dep(), 'bittorrent-protocol', 'index.js'),
+    pkg: 'bittorrent-protocol/package.json',
+    unpatchedConsequence:
+      'an unpatched build freezes at 100% CPU on any inbound encrypted handshake\n' +
+      '  for an info hash this client does not have.',
+    edits: [
+      [
+        '_parsePe2 (outgoing handshake)',
+        '      this._onPe2(pubKey)\n' +
+          '      while (!this._setGenerators) {\n' +
+          '        // Wait until generators have been set\n' +
+          '      }\n' +
+          '      this._parsePe4()',
+        busyWaitGuard('this._onPe2(pubKey)', 'this._parsePe4()'),
+      ],
+      [
+        '_parsePe3 (incoming handshake — the one that froze the app)',
+        '      this._onPe3(buffer)\n' +
+          '      while (!this._setGenerators) {\n' +
+          '        // Wait until generators have been set\n' +
+          '      }\n' +
+          '      this._parsePe3Encrypted()',
+        busyWaitGuard('this._onPe3(buffer)', 'this._parsePe3Encrypted()'),
+      ],
+    ],
+  },
+  {
+    label: 'webtorrent rarity-map',
+    file: path.join(dep(), 'webtorrent', 'lib', 'rarity-map.js'),
+    pkg: 'webtorrent/package.json',
+    unpatchedConsequence:
+      'an unpatched build throws during shutdown and aborts torrent teardown,\n' +
+      '  leaving stores unflushed.',
+    edits: [
+      [
+        "_initWire's close handler (runs after destroy() has nulled everything)",
+        '    wire._onClose = () => {\n' +
+          '      this._cleanupWireEvents(wire)',
+        '    wire._onClose = () => {\n' +
+          `      // ${MARK}: post-destroy guard — see scripts/patch-deps.js.\n` +
+          '      // destroy() nulls _pieces and the shared handlers, and wires only close\n' +
+          '      // afterwards during teardown. Unguarded, this handler then throws — first\n' +
+          '      // on removeListener(_, null) and then on _pieces[i] — and the throw aborts\n' +
+          '      // the whole torrent teardown. A destroyed availability map has nothing to\n' +
+          '      // update, so bail.\n' +
+          '      if (!this._pieces) return\n' +
+          '      this._cleanupWireEvents(wire)',
+      ],
+    ],
+  },
 ];
 
-function main() {
-  const checkOnly = process.argv.includes('--check');
+function version(pkg) {
+  try {
+    return require(pkg).version;
+  } catch (_) {
+    return '?';
+  }
+}
 
+function patchOne(target, checkOnly) {
   let src;
   try {
-    src = fs.readFileSync(TARGET, 'utf8');
+    src = fs.readFileSync(target.file, 'utf8');
   } catch (err) {
-    console.error('patch-deps: cannot read ' + TARGET);
+    console.error('patch-deps: cannot read ' + target.file);
     console.error('  run npm install first');
     process.exit(1);
   }
 
   const already = src.split(MARK).length - 1;
-  if (already === EDITS.length) {
-    console.log('patch-deps: bittorrent-protocol already patched (' + already + '/' + EDITS.length + ')');
+  const expected = target.edits.length;
+
+  if (already === expected) {
+    console.log(
+      'patch-deps: ' + target.label + ' already patched (' + already + '/' + expected + ')'
+    );
     return;
   }
   if (checkOnly) {
-    console.error('patch-deps: NOT patched (' + already + '/' + EDITS.length + ') — run: node scripts/patch-deps.js');
+    console.error(
+      'patch-deps: ' + target.label + ' NOT patched (' + already + '/' + expected + ')' +
+        ' — run: node scripts/patch-deps.js'
+    );
     process.exit(1);
   }
 
   let out = src;
   const applied = [];
-  for (const [label, find, replace] of EDITS) {
+  for (const [label, find, replace] of target.edits) {
     const hits = out.split(find).length - 1;
     if (hits === 0) {
-      console.error('patch-deps: could not find the busy-wait in ' + label + '.');
-      console.error('  bittorrent-protocol has changed. Re-check upstream before shipping —');
-      console.error('  an unpatched build freezes on any inbound encrypted handshake for an');
-      console.error('  info hash this client does not have.');
+      console.error('patch-deps: could not find the target code in ' + label + '.');
+      console.error('  ' + target.label + ' has changed. Re-check upstream before shipping —');
+      console.error('  ' + target.unpatchedConsequence);
       process.exit(1);
     }
     if (hits > 1) {
@@ -129,17 +218,14 @@ function main() {
     applied.push(label);
   }
 
-  fs.writeFileSync(TARGET, out);
-  console.log('patch-deps: patched bittorrent-protocol@' + version() + ':');
+  fs.writeFileSync(target.file, out);
+  console.log('patch-deps: patched ' + target.label + '@' + version(target.pkg) + ':');
   applied.forEach((l) => console.log('  · ' + l));
 }
 
-function version() {
-  try {
-    return require('bittorrent-protocol/package.json').version;
-  } catch (_) {
-    return '?';
-  }
+function main() {
+  const checkOnly = process.argv.includes('--check');
+  for (const target of TARGETS) patchOne(target, checkOnly);
 }
 
 main();

@@ -52,8 +52,17 @@
     if (resolved.has(torrent.id)) return resolved.get(torrent.id);
 
     var hit = pickCover(torrent);
-    if (!hit || !hit.file.streamURL) return null;
+    if (!hit) return null;
 
+    // `localURL` is only ever set for a file already complete on disk, so its
+    // presence *is* the completeness check — and it reads the file directly rather
+    // than through the torrent's piece store.
+    if (hit.file.localURL) {
+      resolved.set(torrent.id, hit.file.localURL);
+      return hit.file.localURL;
+    }
+
+    if (!hit.file.streamURL) return null;
     // Wait for the whole file. Covers are a handful of pieces, and this avoids
     // a broken-image flash or a request that never completes.
     if (MP.store.fileProgress(torrent.id, hit.index) < 1) return null;
@@ -132,7 +141,10 @@
   function fileUrl(torrent, index) {
     if (!torrent || !torrent.files) return null;
     var file = torrent.files[index];
-    if (!file || !file.streamURL || !MP.util.isImageFile(file)) return null;
+    if (!file || !MP.util.isImageFile(file)) return null;
+    // As in coverFileUrl: localURL implies complete, and reads from disk.
+    if (file.localURL) return file.localURL;
+    if (!file.streamURL) return null;
     if (MP.store.fileProgress(torrent.id, index) < 1) return null;
     return file.streamURL;
   }
