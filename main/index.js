@@ -23,6 +23,7 @@ const { createPiecePolicy } = require('./piece-policy');
 const { createFileServer } = require('./file-server');
 const { createLibrary } = require('./library');
 const { importFromMagnets, classifyTrackFile } = require('./library-import');
+const repair = require('./repair');
 const { createTorrentManager } = require('./torrent-manager');
 const { createArtwork } = require('./artwork');
 const nat = require('./nat');
@@ -269,16 +270,29 @@ const fileServer = createFileServer({
    * resolvable, so a record cannot point the player at a file that is not there.
    */
   resolveMedia: (albumId, index) => {
+    const record = library.get(albumId);
+    const track = record && record.tracks.find((t, i) => (t.i != null ? t.i : i) === index);
+
+    // A repaired sibling wins over everything, including a live torrent. Checked
+    // first for that reason: consulting the torrent first sent playback straight back
+    // to the file that stops halfway whenever the album happened to be seeding, which
+    // is most of the half hour after it completes. The torrent's own file is still on
+    // disk and still hashes as valid — that is what keeps the album in the swarm — the
+    // index just points the player somewhere else. `length` is the sibling's own size,
+    // so the server's size check does not read it as a hand-substitution.
+    if (track && track.repairedPath && record.root) {
+      return { root: record.root, relPath: track.repairedPath, length: track.repairedLength || 0 };
+    }
+
     const live = torrentService.resolveMediaLocation(albumId, index);
     if (live) return live;
 
-    const record = library.get(albumId);
     if (!record || !record.root) return null;
-    const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === index);
     // `substituted` is a file the user put there themselves, in place of one the
     // release got wrong. It is playable and it is not what the torrent describes,
     // so it is served exactly like a verified track.
     if (!track || !(track.verified || track.substituted)) return null;
+
     // `length` lets the server tell us when what is on disk is not what the index
     // describes, using the stat it performs anyway.
     return { root: record.root, relPath: track.path, length: track.length || 0 };
@@ -368,10 +382,17 @@ async function reconcileUnverifiedTracks() {
     // earlier version of this pass set it on partially-downloaded files — which then
     // refuse to download, silently and forever. Self-healing rather than a migration
     // because the cost of leaving it is an album that never finishes.
-    const bogus = album.tracks.filter((t) => t.substituted && !t.verified);
+    //
+    // It is also meaningless alongside `repairedPath`: a repaired sibling leaves the
+    // release's own file untouched, so there is nothing substituted. An earlier
+    // version compared the sibling's size against the torrent's length and set this,
+    // which locked the album out of seeding — exactly what the sibling avoids.
+    const bogus = album.tracks.filter((t) => t.substituted && (!t.verified || t.repairedPath));
     if (bogus.length) {
       const cleaned = album.tracks.map((t) =>
-        t.substituted && !t.verified ? Object.assign({}, t, { substituted: false }) : t
+        t.substituted && (!t.verified || t.repairedPath)
+          ? Object.assign({}, t, { substituted: false })
+          : t
       );
       await library.patch(album.id, {
         tracks: cleaned,
@@ -380,7 +401,7 @@ async function reconcileUnverifiedTracks() {
       });
       console.log(
         '[library]', album.name.slice(0, 40) + ':', 'cleared', bogus.length,
-        'bogus replaced-by-hand flag(s) — those files are partial downloads'
+        'replaced-by-hand flag(s) that cannot be true'
       );
     }
 
@@ -446,6 +467,13 @@ async function reconcileTrackSize(albumId, index, actualSize) {
   if (!record) return;
   const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === index);
   if (!track) return;
+
+  // A repaired sibling is what was served, and it is *expected* to differ from the
+  // release — that is the whole point of it. Comparing its size against the torrent's
+  // length read it as a hand-substitution and locked the album out of the swarm,
+  // undoing the one property the sibling design exists to preserve. Its integrity was
+  // verified when it was written, so there is nothing to reconsider here.
+  if (track.repairedPath) return;
 
   const matches = (track.length || 0) === actualSize;
   if (matches && !track.substituted) return; // the ordinary case: nothing to say
@@ -1150,6 +1178,11 @@ async function indexFromLiveTorrent(publicId, magnetUri) {
       // here would silently re-enter the album into "needs downloading" and let
       // webtorrent overwrite their file with the bytes they replaced.
       substituted: !!(prior && prior.substituted),
+      // Carried for the same reason as `substituted`: a live torrent knows nothing
+      // about a repaired sibling, and losing the pointer would silently put playback
+      // back onto the file that stops halfway.
+      repairedPath: prior ? prior.repairedPath : undefined,
+      repairedLength: prior ? prior.repairedLength : undefined,
       repairedAt: prior ? prior.repairedAt : undefined,
       mtimeMs: prior ? prior.mtimeMs : null,
       dur: prior ? prior.dur : null,
@@ -1198,12 +1231,12 @@ function addMagnet(magnetUri, { persist } = {}) {
     // alongside `live` so the UI can distinguish "downloading" from "seeding" without
     // inferring it from progress.
     const record = library.get(data.id);
-    send('torrent-ready', Object.assign({}, data, {
+    send('torrent-ready', withIndexOverlay(record, Object.assign({}, data, {
       state: data.done ? 'seeding' : 'downloading',
       // Carry the index's own view when it has one and the torrent isn't done yet, so
       // a resumed partial reads as `downloading` rather than flipping about.
       complete: record ? record.complete : !!data.done,
-    }));
+    })));
     if (persist !== false) {
       const magnets = store.get('magnets', []);
       if (!magnets.includes(magnetUri)) {
@@ -1299,6 +1332,30 @@ ipcMain.handle('resume-album', async (event, albumId) => {
  * album grouping, track list and queue all read this shape, and changing it and the
  * lifecycle at the same time would make any regression hard to attribute.
  */
+/**
+ * Overlay the facts only the index knows onto a live torrent's file list.
+ *
+ * A live torrent's payload is built by torrent-service, which has never heard of a
+ * repaired sibling or a hand-replaced file. Without this the UI forgot both for
+ * exactly as long as the album happened to be live — and worse, playback fell back to
+ * the torrent's own copy of a track that stops halfway.
+ */
+function withIndexOverlay(record, payload) {
+  if (!record || !payload || !payload.files) return payload;
+  return Object.assign({}, payload, {
+    files: payload.files.map((f, i) => {
+      const track = record.tracks.find((t, j) => (t.i != null ? t.i : j) === i);
+      if (!track || !(track.repairedPath || track.substituted)) return f;
+      return Object.assign({}, f, {
+        repaired: !!track.repairedPath,
+        substituted: !!track.substituted,
+        // A repaired sibling is served from disk whatever the torrent is doing.
+        localURL: track.repairedPath ? fileServer.mediaUrl(record.id, i) : f.localURL,
+      });
+    }),
+  });
+}
+
 function albumToTorrentShape(record) {
   const tracks = record.tracks || [];
   return {
@@ -1318,6 +1375,9 @@ function albumToTorrentShape(record) {
         // Surfaced so the UI can say the album is not purely the release any more,
         // which is the reason it never seeds and never re-downloads.
         substituted: !!t.substituted,
+        // A repaired sibling is playing instead of the torrent's file. Unlike a
+        // substitution this costs the album nothing — it still seeds.
+        repaired: !!t.repairedPath,
         type: 'application/octet-stream',
       };
     }),
@@ -1351,7 +1411,13 @@ ipcMain.handle('get-torrents', () => {
     const liveEntry = liveById.get(record.id);
     if (liveEntry) {
       liveById.delete(record.id);
-      out.push(Object.assign({ state: record.state }, liveEntry, { live: true }));
+      // Index-only facts have to be overlaid onto a live torrent's file list, which
+      // knows nothing about them. Without this the header stopped saying a track was
+      // repaired or replaced for exactly as long as the album was live — the state
+      // flickered with the lifecycle rather than describing the files.
+      out.push(
+        withIndexOverlay(record, Object.assign({ state: record.state }, liveEntry, { live: true }))
+      );
     } else {
       out.push(albumToTorrentShape(record));
     }
@@ -1967,6 +2033,82 @@ ipcMain.handle('forget-home-network', () => {
   return { home: null };
 });
 
+/**
+ * What optional tools are available, so the UI only offers what can actually run.
+ *
+ * Asked once at boot. ffmpeg is not bundled — see main/repair.js — so a Repair
+ * button that shells out to a program that may not exist would be a dead end.
+ */
+ipcMain.handle('get-capabilities', () => ({
+  repairAudio: !!repair.findFfmpeg(),
+  verifyAudio: !!repair.findFlac(),
+}));
+
+/**
+ * Write a clean copy of a damaged track beside the original, and play that instead.
+ *
+ * For a release that is damaged at source, where re-downloading provably cannot help
+ * because the bytes already match the torrent's piece hashes. ffmpeg decodes past the
+ * unreadable frame; the result is verified before anything is recorded, and the
+ * torrent's own file is never touched, so the album goes on seeding.
+ */
+ipcMain.handle('repair-audio', async (event, albumId, fileIndex) => {
+  const ffmpeg = repair.findFfmpeg();
+  if (!ffmpeg) {
+    return {
+      error:
+        'This needs ffmpeg, which is not installed. `brew install ffmpeg` and restart ' +
+        'the app to enable it.',
+    };
+  }
+
+  const record = library.get(albumId);
+  if (!record || !record.root) return { error: 'That album is not in the library.' };
+  const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === fileIndex);
+  if (!track) return { error: 'That track is not in the index.' };
+  if (track.repairedPath) return { error: 'This track has already been repaired.' };
+  if (!repair.isRepairable(track.path)) {
+    return {
+      error:
+        'Only lossless files can be repaired this way. Patching a lossy file means ' +
+        're-compressing the whole track to fix one frame, which costs more than it ' +
+        'gains — and lossy decoders play through damage rather than stopping.',
+    };
+  }
+
+  const relOut = repair.repairedPathFor(track.path);
+  const srcAbs = path.join(record.root, track.path);
+  const outAbs = path.join(record.root, relOut);
+
+  console.log('[repair] rebuilding', track.name, 'with', ffmpeg);
+  const result = await repair.repairFile({
+    ffmpeg: ffmpeg,
+    flac: repair.findFlac(),
+    srcAbs: srcAbs,
+    outAbs: outAbs,
+  });
+  if (!result.ok) {
+    console.warn('[repair] failed:', result.error);
+    return { error: result.error };
+  }
+
+  const tracks = record.tracks.map((t, i) =>
+    (t.i != null ? t.i : i) === fileIndex
+      ? Object.assign({}, t, {
+          repairedPath: relOut,
+          repairedLength: result.bytes,
+          repairedAt: new Date().toISOString(),
+        })
+      : t
+  );
+  await library.patch(albumId, { tracks: tracks });
+  console.log(
+    '[repair] wrote', relOut, '(' + result.bytes + ' bytes, verified with ' + result.verifiedWith + ')'
+  );
+  send('torrent-ready', albumToTorrentShape(library.get(albumId)));
+  return { success: true, name: track.name, bytes: result.bytes, verifiedWith: result.verifiedWith };
+});
+
 ipcMain.handle('open-torrent-folder', async (event, torrentId, fileIndex) => {
   // Select the track itself when the caller knows which one. `showItemInFolder`
   // opens the enclosing folder with the file highlighted, which for a 242-file
@@ -1976,7 +2118,9 @@ ipcMain.handle('open-torrent-folder', async (event, torrentId, fileIndex) => {
     const record = library.get(torrentId);
     const track = record && record.tracks.find((t, i) => (t.i != null ? t.i : i) === fileIndex);
     if (record && record.root && track) {
-      const full = path.join(record.root, track.path);
+      // The repaired sibling, when that is what playback uses — otherwise Reveal
+      // highlights a file the user is not listening to.
+      const full = path.join(record.root, track.repairedPath || track.path);
       try {
         await fsp.access(full);
         shell.showItemInFolder(full);

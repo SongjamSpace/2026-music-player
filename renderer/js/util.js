@@ -227,6 +227,14 @@
     return list.indexOf(extOf(file)) !== -1;
   }
 
+  // Lossless audio, the only kind worth re-encoding to patch a damaged frame —
+  // see main/repair.js for why a lossy file is left alone.
+  var LOSSLESS_EXTENSIONS = ['.flac', '.wav', '.aif', '.aiff'];
+
+  function isLossless(file) {
+    return hasExt(file, LOSSLESS_EXTENSIONS);
+  }
+
   function isVideoFile(file) {
     return hasExt(file, VIDEO_EXTENSIONS);
   }
@@ -332,6 +340,7 @@
     parseInfoHash: parseInfoHash,
     parseDisplayName: parseDisplayName,
     decodeEntities: decodeEntities,
+    isLossless: isLossless,
     isVideoFile: isVideoFile,
     isAudioFile: isAudioFile,
     isImageFile: isImageFile,

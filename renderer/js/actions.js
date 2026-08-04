@@ -59,6 +59,25 @@
     });
   }
 
+  /**
+   * Patch a damaged file rather than re-fetch it.
+   *
+   * For a release that is broken at source, where re-downloading provably cannot help.
+   * The repaired copy is written beside the original and played instead, so the
+   * torrent's own file stays intact and the album keeps seeding.
+   */
+  function repairAudio(id, fileIndex) {
+    MP.toast.show('Rebuilding the track — this decodes and re-encodes the whole file, so give it a moment.');
+    return window.playerAPI.repairAudio(id, fileIndex).then(function (r) {
+      if (r && r.error) {
+        MP.toast.error(r.error);
+        return false;
+      }
+      MP.toast.show('Repaired “' + r.name + '”. Verified with ' + r.verifiedWith + '.');
+      return true;
+    });
+  }
+
   function openDownloadFolder() {
     return window.playerAPI.openDownloadFolder().then(function (r) {
       if (r && r.error) MP.toast.error('Could not open folder: ' + r.error);
@@ -129,6 +148,7 @@
     addMagnet: addMagnet,
     openTorrentFolder: openTorrentFolder,
     repairTrack: repairTrack,
+    repairAudio: repairAudio,
     openDownloadFolder: openDownloadFolder,
     removeTorrent: removeTorrent,
     seedAlbum: seedAlbum,

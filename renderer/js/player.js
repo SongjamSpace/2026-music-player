@@ -23,6 +23,9 @@
   // 'canplay': the swap itself produces a canplay, and resetting there would let
   // two sources ping-pong on a file that is broken both ways.
   var sourceRecovered = false;
+  // Optional main-process tools, asked once at init. ffmpeg is not bundled, so a
+  // Repair action that shells out to it must not be offered when it is absent.
+  var capabilities = { repairAudio: false, verifyAudio: false };
 
   var WATCHDOG_MS = 12000;
   var PREV_RESTART_THRESHOLD = 3; // seconds
@@ -621,14 +624,29 @@
     var repairable = !!(file && file.localURL && wasPlaying);
 
     var message = repairable
-      ? 'This track is damaged from about ' + MP.util.formatDuration(media.currentTime) +
-        ' — the file on disk is the right size but some of it never arrived.'
+      ? 'This track is damaged from about ' + MP.util.formatDuration(media.currentTime) + '.'
       : ERROR_MESSAGES[code] || 'Playback failed.';
 
     MP.store.setPlayback({ isPlaying: false, isBuffering: false, error: message }, 'playback:state');
 
     var action = null;
-    if (repairable) {
+    // Patching beats re-downloading when it is available, and by a wide margin: the
+    // damage is as likely to be in the release as on disk, and re-downloading cannot
+    // fix the release. It also costs one file rather than re-hashing the album, and
+    // leaves the torrent's own copy intact so the album keeps seeding.
+    var canPatch = capabilities.repairAudio && repairable && !file.repaired &&
+      MP.util.isLossless(file);
+
+    if (canPatch) {
+      action = {
+        label: 'Repair',
+        onClick: function () {
+          MP.actions.repairAudio(p.torrentId, p.fileIndex).then(function (ok) {
+            if (ok) play(p.torrentId, p.fileIndex);
+          });
+        },
+      };
+    } else if (repairable) {
       action = {
         label: 'Re-download',
         onClick: function () { MP.actions.repairTrack(p.torrentId, p.fileIndex); },
@@ -767,6 +785,10 @@
   }
 
   function init(prefs) {
+    window.playerAPI.getCapabilities().then(function (c) {
+      if (c) capabilities = c;
+    }).catch(function () { /* absent tools are the default */ });
+
     audio = document.getElementById('audio-player');
     video = document.getElementById('video-player');
     stage = document.getElementById('video-stage');

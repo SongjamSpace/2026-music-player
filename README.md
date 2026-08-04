@@ -344,6 +344,45 @@ The retry hangs off `torrent:files:<id>` as well as the progress topic. Progress
 alone was wrong — that ticker runs for live torrents only, so an album that failed
 to wake would never fire it and the retry would wait forever.
 
+### Repairing a damaged track
+
+When a release is damaged at source, the app can patch the file: ffmpeg's decoder
+skips the unreadable frame where Chromium stops dead, and re-encoding what it produces
+gives a file that decodes all the way through. A FLAC frame is ~100 ms, so the
+discontinuity is inaudible — but it is a patch, not a restoration, and nothing in the
+UI claims the lost audio came back.
+
+The repaired copy is written **beside** the original as `<name> (repaired).flac`, and
+the index points playback at it. That is what keeps the album in the swarm: the
+torrent's own file stays byte-intact and still hashes as valid, so seeding continues
+and the album still reads 100%. Overwriting would force the "replaced by hand"
+lockout below.
+
+- **ffmpeg is not bundled.** It is ~70 MB and would need signing alongside the app, so
+  `main/repair.js` looks for an installed one and the UI offers Repair only when it
+  finds one. A GUI app inherits almost no `PATH` on macOS, so the Homebrew prefixes are
+  checked explicitly rather than shelling out to `which`; `MP_FFMPEG` overrides.
+- **Lossless only.** Patching a lossy file means re-compressing the whole track to fix
+  one frame, and lossy decoders glitch through damage rather than stopping.
+- **Always `.flac` out**, whatever went in. A `.wav` name holding FLAC bytes would be
+  served as `audio/wav` from the extension map and Chromium would refuse it.
+- **Verified before it is recorded**, with `flac -t` when installed — that checks every
+  frame's CRC, which is exactly the failure being repaired. A result under half the
+  original size is rejected: that means ffmpeg stopped at the damage rather than
+  skipping it, which would be a worse file presented as a fix.
+- Written to a `.part` file in the same directory and renamed, so the destination is
+  never a half-written file the index already points at. `-f flac` is explicit because
+  ffmpeg refuses to infer a format from `.part`.
+
+Two ordering bugs worth knowing about, both found in verification:
+
+- `resolveMedia` checks the repaired sibling **before** the live torrent. Asking the
+  torrent first sent playback back to the file that stops halfway whenever the album
+  happened to be seeding — which is most of the half hour after it completes.
+- A live torrent's payload knows nothing about the index, so `withIndexOverlay` applies
+  `repaired`/`substituted` and the local URL to it. Without that the UI forgot both for
+  as long as the album was live, and playback lost the sibling with it.
+
 ### Replacing a track by hand
 
 When a release is damaged at source, re-downloading cannot help — every peer has the

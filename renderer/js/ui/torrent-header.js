@@ -12,9 +12,15 @@
     if (t.length) parts.push(MP.util.formatBytes(t.length));
     if (t.done) {
       // Say when the album is not purely the release any more. Without it, "Complete"
-      // hides the reason this album never seeds and never re-downloads.
-      var swapped = (t.files || []).filter(function (f) { return f.substituted; }).length;
-      parts.push(swapped ? 'Complete · ' + swapped + ' replaced by hand' : 'Complete');
+      // hides both why an album never seeds (a hand-replaced file) and the fact that
+      // a track is playing from a patched copy rather than the release's own.
+      var files = t.files || [];
+      var swapped = files.filter(function (f) { return f.substituted; }).length;
+      var patched = files.filter(function (f) { return f.repaired; }).length;
+      var notes = [];
+      if (swapped) notes.push(swapped + ' replaced by hand');
+      if (patched) notes.push(patched + (patched === 1 ? ' track repaired' : ' tracks repaired'));
+      parts.push(notes.length ? 'Complete · ' + notes.join(' · ') : 'Complete');
     } else {
       parts.push(Math.round((t.progress || 0) * 100) + '%');
       // "no peers" is only true of a torrent that is actually looking for them.

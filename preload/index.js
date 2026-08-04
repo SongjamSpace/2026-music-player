@@ -71,6 +71,10 @@ contextBridge.exposeInMainWorld('playerAPI', {
   openTorrentFolder: (torrentId, fileIndex) =>
     ipcRenderer.invoke('open-torrent-folder', torrentId, fileIndex),
   repairTrack: (albumId, fileIndex) => ipcRenderer.invoke('repair-track', albumId, fileIndex),
+  // Patch a damaged file in place of re-downloading it, for a release that is broken
+  // at source. Needs ffmpeg; see getCapabilities().
+  repairAudio: (albumId, fileIndex) => ipcRenderer.invoke('repair-audio', albumId, fileIndex),
+  getCapabilities: () => ipcRenderer.invoke('get-capabilities'),
   openDownloadFolder: () => ipcRenderer.invoke('open-download-folder'),
 
   onTorrentReady: subscribe('torrent-ready'),
