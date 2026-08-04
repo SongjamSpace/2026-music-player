@@ -202,4 +202,41 @@ async function importFromMagnets({ library, magnets, cacheDir, downloadRoot, now
   return result;
 }
 
-module.exports = { importFromMagnets, buildRecord, infoHashFromMagnet };
+/**
+ * What a file on disk is, for a track the index does not consider verified.
+ *
+ * The interesting case is a file the user put there themselves, having found a
+ * clean copy of a track the release got wrong. It plays perfectly and it is not
+ * what the torrent describes, and the index has to hold both of those facts: serve
+ * it, and never let webtorrent decide it is a corrupt piece and overwrite it.
+ *
+ * Length is the only signal available without hashing, and on its own it is not
+ * enough. WebTorrent grows a partial file as chunks land, so a wrong length can just
+ * as easily mean "this download never finished". Two conditions separate them, and
+ * both are necessary:
+ *
+ *   - the index previously vouched for this track (`verified`), so we are looking at
+ *     a file that *was* the release's and is not any more;
+ *   - no torrent is live for the album, so nothing is writing to it right now.
+ *
+ * The first was learned the hard way. Judging on length and liveness alone marked 74
+ * tracks of a 1%-downloaded album as hand-replaced on the first run — they were
+ * simply half-written from an earlier session, and nothing is live during boot. The
+ * cost of that mistake is not cosmetic: a substituted track is never re-downloaded,
+ * so it would have stopped those albums finishing, permanently and silently.
+ *
+ * @param {{length: number, verified: boolean}} track   the index record
+ * @param {{exists: boolean, size: number}|null} stat
+ * @param {boolean} downloading      is a torrent for this album live right now
+ * @returns {'missing'|'verified'|'substituted'|'partial'}
+ */
+function classifyTrackFile(track, stat, downloading) {
+  if (!stat || !stat.exists) return 'missing';
+  const expected = Number(track && track.length) || 0;
+  if (expected > 0 && stat.size === expected) return 'verified';
+  if (stat.size <= 0) return 'missing'; // a zero-length stub is not a file
+  if (downloading || !(track && track.verified)) return 'partial';
+  return 'substituted';
+}
+
+module.exports = { importFromMagnets, buildRecord, infoHashFromMagnet, classifyTrackFile };

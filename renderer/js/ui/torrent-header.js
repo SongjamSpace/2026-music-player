@@ -11,7 +11,10 @@
     if (count) parts.push(count === 1 ? '1 track' : count + ' tracks');
     if (t.length) parts.push(MP.util.formatBytes(t.length));
     if (t.done) {
-      parts.push('Complete');
+      // Say when the album is not purely the release any more. Without it, "Complete"
+      // hides the reason this album never seeds and never re-downloads.
+      var swapped = (t.files || []).filter(function (f) { return f.substituted; }).length;
+      parts.push(swapped ? 'Complete · ' + swapped + ' replaced by hand' : 'Complete');
     } else {
       parts.push(Math.round((t.progress || 0) * 100) + '%');
       // "no peers" is only true of a torrent that is actually looking for them.

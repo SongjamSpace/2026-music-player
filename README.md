@@ -344,6 +344,39 @@ The retry hangs off `torrent:files:<id>` as well as the progress topic. Progress
 alone was wrong — that ticker runs for live torrents only, so an album that failed
 to wake would never fire it and the retry would wait forever.
 
+### Replacing a track by hand
+
+When a release is damaged at source, re-downloading cannot help — every peer has the
+same bytes. The fix is to find a clean copy of that one track and drop it into the
+album folder under the same name, and the app's job is then to get out of the way.
+
+A track marked `substituted` is served from disk regardless of length, counts as
+present so the album reads complete, and is never re-downloaded. The album will not
+go live at all: waking it would have webtorrent hash the album, find the piece
+covering that file failing, and download over the user's copy. There is no per-file
+way to opt out that also lets an album report itself complete, so seeding, resuming
+and the reachability check all refuse with the reason. Removing and re-adding the
+album is the way back to the release's own file.
+
+Detection is at serve time, from the `stat` the file server already performs, and the
+rule needs **both** halves:
+
+- the index previously vouched for the track (`verified`), and
+- no torrent is live for the album.
+
+The first half was learned by getting it wrong. Judging on length and liveness alone
+marked **74 tracks of a 1%-downloaded album** as hand-replaced on the first run —
+they were half-written from an earlier session, and nothing is live during boot.
+Because a substituted track is never re-downloaded, that would have stopped those
+albums finishing, silently and permanently. `classifyTrackFile` in
+`library-import.js` holds the rule and `library-check.js` pins both directions;
+`reconcileUnverifiedTracks` clears the flag where it cannot be true, so an index
+written by the broken version heals itself on the next launch.
+
+A matching size is reported too, not just a mismatch: when the release's own file
+comes back the substitution has to be un-recorded, or the album would stay out of the
+swarm on the strength of a file that is no longer there.
+
 Media and cover art have separate concurrency budgets, not one shared pool. They
 shared one at first, which meant a screen full of art could take every slot and a
 media read would answer 503 — arriving at the renderer as a bare `MediaError`,

@@ -17,6 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createLibrary, RECORD_VERSION } = require('../main/library');
+const { classifyTrackFile } = require('../main/library-import');
 
 let failures = 0;
 
@@ -326,6 +327,73 @@ async function main() {
     check('index stays under 25 MB at 10k tracks', bytes < 25 * 1048576, true);
     // Generous, because CI machines vary; the point is that it is not seconds.
     check('loads in under 2s at 10k tracks', ms < 2000, true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // -- what a file on disk is, for an unverified track ---------------------
+  {
+    // The rule behind "drop a clean copy of a broken track into the folder and the
+    // app serves it". Length is the only signal available without hashing, and it
+    // only means anything when nothing is writing to the file — which is why
+    // `downloading` is a parameter and not an assumption.
+    const track = { length: 1000, verified: true };
+    const c = classifyTrackFile;
+
+    check('absent → missing', c(track, { exists: false, size: 0 }, false), 'missing');
+    check('no stat at all → missing', c(track, null, false), 'missing');
+    check('exact length → verified', c(track, { exists: true, size: 1000 }, false), 'verified');
+    check('...even mid-download', c(track, { exists: true, size: 1000 }, true), 'verified');
+
+    // The case this exists for: a hand-placed replacement, which is a different file
+    // and therefore almost never the same length.
+    check('different length, nothing downloading → substituted',
+      c(track, { exists: true, size: 1234 }, false), 'substituted');
+    check('shorter, nothing downloading → substituted',
+      c(track, { exists: true, size: 40 }, false), 'substituted');
+
+    // The direction that must not be permissive. A partial file grows as chunks
+    // land, so calling that "substituted" would stop the download and leave a
+    // truncated file being served as if the user had chosen it.
+    check('different length while downloading → partial',
+      c(track, { exists: true, size: 1234 }, true), 'partial');
+    check('...shorter too', c(track, { exists: true, size: 40 }, true), 'partial');
+
+    // The regression this rule was rewritten for. An unverified track with a wrong
+    // length is an unfinished download, whatever is or isn't live — judging on length
+    // and liveness alone marked 74 tracks of a 1%-downloaded album as hand-replaced,
+    // and a hand-replaced track is never re-downloaded.
+    const unvouched = { length: 1000, verified: false };
+    check('unverified + wrong length → partial, not substituted',
+      c(unvouched, { exists: true, size: 40 }, false), 'partial');
+    check('...even with nothing live', c(unvouched, { exists: true, size: 999 }, false), 'partial');
+    check('an unverified track can still reach the exact length',
+      c(unvouched, { exists: true, size: 1000 }, false), 'verified');
+
+    // A zero-length file is a stub, not a substitution.
+    check('zero length → missing', c(track, { exists: true, size: 0 }, false), 'missing');
+    check('a track with no known length is never verified',
+      c({ length: 0 }, { exists: true, size: 0 }, false), 'missing');
+  }
+
+  // -- the substituted flag survives a round trip --------------------------
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mp-lib-sub-'));
+    const lib = createLibrary({ dir });
+    await lib.load();
+    await lib.upsert({
+      id: 'a', name: 'A', complete: true, root: '/tmp/a',
+      tracks: [
+        { i: 0, path: 'a/1.flac', name: '1.flac', length: 10, verified: true },
+        { i: 1, path: 'a/2.flac', name: '2.flac', length: 20, substituted: true },
+      ],
+    });
+    await lib.flush();
+
+    const reopened = createLibrary({ dir });
+    await reopened.load();
+    const back = reopened.get('a');
+    check('substituted survives reload', back.tracks[1].substituted, true);
+    check('...and does not leak onto other tracks', !!back.tracks[0].substituted, false);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 

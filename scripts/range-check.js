@@ -62,20 +62,28 @@ async function main() {
 
   // Records (albumId, index) pairs the server reports as gone from disk.
   const missing = [];
+  // And (albumId, index, actualSize) for a file that is not the declared length.
+  const mismatched = [];
 
   const server = createFileServer({
     resolveMedia: (id, index) => {
       if (id !== 'album1') return null;
-      if (index === 0) return { root, relPath: 'track.flac' };
+      if (index === 0) return { root, relPath: 'track.flac', length: SIZE };
       if (index === 1) return { root, relPath: 'empty.flac' };
       // Deliberate traversal attempt, as a bad torrent's file path would be.
       if (index === 2) return { root, relPath: '../outside.flac' };
       // Resolvable, but deliberately never created: the index claiming a file that
       // is no longer on disk is exactly the case onMediaMissing exists for.
       if (index === 3) return { root, relPath: 'deleted.flac' };
+      // Declared length deliberately wrong, standing in for a file the user replaced
+      // with a clean copy of the same track.
+      if (index === 4) return { root, relPath: 'track.flac', length: SIZE + 999 };
+      // Same file, declared length correct — for the matching-size report.
+      if (index === 5) return { root, relPath: 'track.flac', length: SIZE };
       return null;
     },
     onMediaMissing: (id, index) => missing.push([id, index]),
+    onMediaSize: (id, index, size) => mismatched.push([id, index, size]),
     resolveArt: (id, variant) => (variant === 'thumb' ? path.join(root, 'track.flac') : null),
   });
 
@@ -240,6 +248,36 @@ async function main() {
     fs.unlinkSync(path.join(root, 'deleted.flac'));
     await request(base + '/media/album1/3');
     check('...a second disappearance is reported again', missing.length, 1);
+  }
+
+  // -- a file that is not the length the index declared ---------------------
+  {
+    // How a hand-replaced track is noticed: the server stats every file it serves
+    // anyway, so comparing that against the length the index declared is free. It
+    // reports and serves — deciding what a mismatch *means* needs to know whether a
+    // torrent is mid-write, which only the caller knows.
+    mismatched.length = 0;
+    const r = await request(base + '/media/album1/4');
+    check('a wrong-length file is still served', r.status, 200);
+    check('...with the real length, not the declared one', r.headers['content-length'], String(SIZE));
+    check('...and the mismatch is reported', JSON.stringify(mismatched), '[["album1",4,' + SIZE + ']]');
+
+    await request(base + '/media/album1/4');
+    check('...reported once per size, not per request', mismatched.length, 1);
+
+    // A matching size is reported too, so a substitution that has been put back can
+    // be un-recorded. The caller decides what it means; the server states the fact.
+    // A track not requested earlier in this run, because the report is one-shot per
+    // (track, size) and index 0 has already been served many times above.
+    mismatched.length = 0;
+    await request(base + '/media/album1/5');
+    check('a matching size is reported as the fact it is',
+      JSON.stringify(mismatched), '[["album1",5,' + SIZE + ']]');
+
+    // No declared length means nothing to compare against, so nothing is said.
+    mismatched.length = 0;
+    await request(base + '/media/album1/1');
+    check('a track with no declared length says nothing', mismatched.length, 0);
   }
 
   // -- art cannot starve media --------------------------------------------

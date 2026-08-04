@@ -22,7 +22,7 @@ const { createTrackers } = require('./trackers');
 const { createPiecePolicy } = require('./piece-policy');
 const { createFileServer } = require('./file-server');
 const { createLibrary } = require('./library');
-const { importFromMagnets } = require('./library-import');
+const { importFromMagnets, classifyTrackFile } = require('./library-import');
 const { createTorrentManager } = require('./torrent-manager');
 const { createArtwork } = require('./artwork');
 const nat = require('./nat');
@@ -275,8 +275,13 @@ const fileServer = createFileServer({
     const record = library.get(albumId);
     if (!record || !record.root) return null;
     const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === index);
-    if (!track || !track.verified) return null;
-    return { root: record.root, relPath: track.path };
+    // `substituted` is a file the user put there themselves, in place of one the
+    // release got wrong. It is playable and it is not what the torrent describes,
+    // so it is served exactly like a verified track.
+    if (!track || !(track.verified || track.substituted)) return null;
+    // `length` lets the server tell us when what is on disk is not what the index
+    // describes, using the stat it performs anyway.
+    return { root: record.root, relPath: track.path, length: track.length || 0 };
   },
 
   /**
@@ -299,9 +304,190 @@ const fileServer = createFileServer({
     );
   },
 
+  /**
+   * The size of a media file on disk, reported by the server as it serves it.
+   *
+   * Two readings, and both matter. A size other than the release's, with no torrent
+   * live, means the file was replaced from outside — a supported move, because a
+   * release with one damaged track is fixed by dropping in a clean copy of that
+   * track, and recording it is what stops the app repairing the user's file back to
+   * the broken version. A size that matches again means the release's own file is
+   * back, and a previous substitution no longer holds — without that the album would
+   * refuse to seed forever on the strength of a file that is no longer there.
+   *
+   * With a torrent live, a mismatch is a download in progress and says nothing.
+   */
+  onMediaSize: (albumId, index, actualSize) => {
+    if (torrentService.has(albumId)) return;
+    reconcileTrackSize(albumId, index, actualSize).catch((err) =>
+      console.warn('[library] could not record a track size:', err.message)
+    );
+  },
+
   /** Resized covers out of the art cache — see main/artwork.js. */
   resolveArt: (albumId, variant) => artwork.pathFor(albumId, variant),
 });
+
+/** Does this album hold a file the user replaced by hand? */
+function hasSubstitutedTrack(record) {
+  return !!(record && (record.tracks || []).some((t) => t.substituted));
+}
+
+/**
+ * The one sentence every caller needs when it cannot bring such an album up.
+ *
+ * Worth stating rather than failing vaguely: the album is deliberately asleep, the
+ * reason is a decision the user made, and there is a way back if they want the
+ * release's own file again.
+ */
+const SUBSTITUTED_REFUSAL =
+  'This album has a track you replaced by hand. Going back into the swarm would ' +
+  'overwrite it with the release’s version, so the torrent stays off. Remove the ' +
+  'album and re-add it if you want the original back.';
+
+/**
+ * Look at the tracks the index does not vouch for, and see what is on disk.
+ *
+ * Runs once at startup, before the window opens. The cost is bounded by the number
+ * of *unverified* tracks rather than by the library, which is normally zero and was
+ * three when this was written — nothing like the stat-everything sweep the design
+ * deliberately avoids.
+ *
+ * It exists for one specific move: a release with a damaged track, where the fix is
+ * to find a clean copy of that one file and drop it into the album folder. The app
+ * has to notice and then get out of the way — serve the file, stop trying to
+ * download it, and never let webtorrent overwrite it.
+ *
+ * Nothing is live yet at this point in boot, which is exactly what makes the length
+ * comparison meaningful: no writer can be halfway through a file.
+ */
+async function reconcileUnverifiedTracks() {
+  for (const album of library.list()) {
+    // Undo a flag that cannot be true. `substituted` means "this was the release's
+    // file and now it is the user's", so it is meaningless without `verified`, and an
+    // earlier version of this pass set it on partially-downloaded files — which then
+    // refuse to download, silently and forever. Self-healing rather than a migration
+    // because the cost of leaving it is an album that never finishes.
+    const bogus = album.tracks.filter((t) => t.substituted && !t.verified);
+    if (bogus.length) {
+      const cleaned = album.tracks.map((t) =>
+        t.substituted && !t.verified ? Object.assign({}, t, { substituted: false }) : t
+      );
+      await library.patch(album.id, {
+        tracks: cleaned,
+        complete: cleaned.every((t) => t.verified || t.substituted),
+        presentBytes: cleaned.reduce((n, t) => (t.verified || t.substituted ? n + (t.length || 0) : n), 0),
+      });
+      console.log(
+        '[library]', album.name.slice(0, 40) + ':', 'cleared', bogus.length,
+        'bogus replaced-by-hand flag(s) — those files are partial downloads'
+      );
+    }
+
+    const record = library.get(album.id);
+    if (!record || !record.root) continue;
+    const pending = record.tracks.filter((t) => !t.verified && !t.substituted);
+    if (!pending.length) continue;
+    try {
+      await fsp.access(record.root);
+    } catch (_) {
+      continue; // root unreachable — say nothing rather than guess
+    }
+
+    // Only an exact length match is acted on here. A mismatch is ambiguous at boot —
+    // an unfinished download looks identical to a replaced file — and the ambiguity
+    // is resolved later, at serve time, where the track's own history is known.
+    const found = [];
+    for (const track of pending) {
+      let stat = null;
+      try {
+        const st = await fsp.stat(path.join(record.root, track.path));
+        stat = { exists: st.isFile(), size: st.size };
+      } catch (_) {
+        stat = { exists: false, size: 0 };
+      }
+      // `false` for downloading: nothing is live during boot.
+      if (classifyTrackFile(track, stat, false) === 'verified') found.push(track.i);
+    }
+    if (!found.length) continue;
+
+    const tracks = record.tracks.map((t, i) =>
+      found.indexOf(t.i != null ? t.i : i) === -1 ? t : Object.assign({}, t, { verified: true })
+    );
+    const present = tracks.reduce(
+      (n, t) => (t.verified || t.substituted ? n + (t.length || 0) : n),
+      0
+    );
+    const whole = tracks.every((t) => t.verified || t.substituted);
+    await library.patch(album.id, {
+      tracks: tracks,
+      presentBytes: present,
+      complete: whole,
+      state: whole ? 'archived' : record.state,
+    });
+
+    console.log(
+      '[library]', record.name.slice(0, 40) + ':', found.length,
+      'track(s) confirmed on disk at the expected size'
+    );
+  }
+}
+
+/**
+ * Record that a track on disk is the user's own file, not the release's.
+ *
+ * Deliberately does not correct `length` to the file's real size. That field is what
+ * the torrent describes, and it is how this is recognised as a substitution at all
+ * on the next launch; overwriting it would erase the evidence. `substitutedLength`
+ * carries the actual size for anyone who wants it.
+ */
+async function reconcileTrackSize(albumId, index, actualSize) {
+  const record = library.get(albumId);
+  if (!record) return;
+  const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === index);
+  if (!track) return;
+
+  const matches = (track.length || 0) === actualSize;
+  if (matches && !track.substituted) return; // the ordinary case: nothing to say
+  if (!matches && track.substituted) return; // already recorded
+
+  if (matches) {
+    // The release's own file is back — a re-download, or the user putting it back.
+    // The substitution no longer describes anything, and leaving it would keep the
+    // album out of the swarm on the strength of a file that is gone.
+    const restored = record.tracks.map((t, i) =>
+      (t.i != null ? t.i : i) === index
+        ? Object.assign({}, t, { substituted: false, substitutedLength: undefined })
+        : t
+    );
+    await library.patch(albumId, { tracks: restored });
+    console.log('[library]', track.name, 'matches the release again — no longer treated as replaced');
+    send('torrent-ready', albumToTorrentShape(library.get(albumId)));
+    return;
+  }
+
+  // Only a file we previously vouched for. Without this an unfinished download would
+  // be recorded as the user's own choice and then never completed — which is exactly
+  // what happened when the boot pass judged on length alone.
+  if (!track.verified) return;
+
+  const tracks = record.tracks.map((t, i) =>
+    (t.i != null ? t.i : i) === index
+      ? Object.assign({}, t, { substituted: true, substitutedLength: actualSize })
+      : t
+  );
+  const whole = tracks.every((t) => t.verified || t.substituted);
+  await library.patch(albumId, {
+    tracks: tracks,
+    complete: whole,
+    state: whole ? 'archived' : record.state,
+  });
+  console.log(
+    '[library]', track.name, 'has been replaced by hand (' + actualSize + ' bytes, ' +
+      'the release has ' + track.length + ') — it will be served as it is and never overwritten'
+  );
+  send('torrent-ready', albumToTorrentShape(library.get(albumId)));
+}
 
 /**
  * Record that a verified track has gone from disk, and start getting it back.
@@ -314,7 +500,9 @@ async function markTrackMissing(albumId, index) {
   const record = library.get(albumId);
   if (!record) return;
   const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === index);
-  if (!track || !track.verified) return; // already known, or never claimed
+  // A substituted file counts: if the user deletes their own replacement there is
+  // nothing left to protect, so the album goes back to fetching the release's copy.
+  if (!track || !(track.verified || track.substituted)) return;
 
   // An unplugged drive makes every track 404 at once. Marking them all unverified
   // would be a false diagnosis with a lasting cost: the flags persist, so a library
@@ -330,7 +518,9 @@ async function markTrackMissing(albumId, index) {
   }
 
   const tracks = record.tracks.map((t, i) =>
-    (t.i != null ? t.i : i) === index ? Object.assign({}, t, { verified: false }) : t
+    (t.i != null ? t.i : i) === index
+      ? Object.assign({}, t, { verified: false, substituted: false })
+      : t
   );
   await library.patch(albumId, {
     tracks: tracks,
@@ -808,6 +998,7 @@ app.whenReady().then(async () => {
         await library.patch(album.id, { state: album.complete ? 'archived' : 'idle' });
       }
     }
+    if (libraryRoot.ok) await reconcileUnverifiedTracks();
   } catch (err) {
     // The index is additive at this point: the app still works from live torrents
     // without it, so a failure here must not stop the window opening.
@@ -954,6 +1145,12 @@ async function indexFromLiveTorrent(publicId, magnetUri) {
       // Sticky: a file webtorrent has verified once does not become unverified
       // because a later snapshot was taken mid-download.
       verified: complete || !!(prior && prior.verified),
+      // Carried forward deliberately. This is a statement about a file the user
+      // replaced by hand, and a live torrent knows nothing about it — dropping it
+      // here would silently re-enter the album into "needs downloading" and let
+      // webtorrent overwrite their file with the bytes they replaced.
+      substituted: !!(prior && prior.substituted),
+      repairedAt: prior ? prior.repairedAt : undefined,
       mtimeMs: prior ? prior.mtimeMs : null,
       dur: prior ? prior.dur : null,
     };
@@ -1045,6 +1242,14 @@ const torrentManager = createTorrentManager({
   // renderer used to render as "this format isn't supported".
   isPlaying: (publicId) => publicId === playingAlbumId,
   wake: (publicId, record) => {
+    // Backstop for a hand-replaced track. Bringing this torrent up would have
+    // webtorrent hash the album, find the piece covering that file failing — because
+    // it is not the release's file — and download over it. There is no per-file way
+    // to opt out that also lets the album report itself complete, so the album stays
+    // asleep and every caller gets a clear refusal instead.
+    if (hasSubstitutedTrack(record)) {
+      return Promise.reject(new Error('album contains a hand-replaced track'));
+    }
     // The magnet is what `add()` takes; the cached .torrent it prefers internally is
     // what makes waking instant and offline. An album with neither cannot be woken.
     const magnetUri = record.magnetURI ||
@@ -1068,12 +1273,14 @@ ipcMain.handle('add-torrent', async (event, magnetUri) => addMagnet(magnetUri));
 
 /** Explicit user action, from the album menu. */
 ipcMain.handle('seed-album', async (event, albumId) => {
+  if (hasSubstitutedTrack(library.get(albumId))) return { error: SUBSTITUTED_REFUSAL };
   const ok = await torrentManager.seed(albumId);
   return { success: ok };
 });
 
 /** Explicit user action: resume a download that is queued behind the live cap. */
 ipcMain.handle('resume-album', async (event, albumId) => {
+  if (hasSubstitutedTrack(library.get(albumId))) return { error: SUBSTITUTED_REFUSAL };
   const ok = await torrentManager.ensureLive(albumId, 'user asked to resume');
   return { success: ok };
 });
@@ -1107,7 +1314,10 @@ function albumToTorrentShape(record) {
         // No torrent, so no torrent stream. A verified track still plays, straight
         // off disk — which is the entire point.
         streamURL: null,
-        localURL: t.verified ? fileServer.mediaUrl(record.id, index) : null,
+        localURL: t.verified || t.substituted ? fileServer.mediaUrl(record.id, index) : null,
+        // Surfaced so the UI can say the album is not purely the release any more,
+        // which is the reason it never seeds and never re-downloads.
+        substituted: !!t.substituted,
         type: 'application/octet-stream',
       };
     }),
@@ -1124,8 +1334,8 @@ function albumToTorrentShape(record) {
     // authoritative — so an archived album shows correct per-track progress with no
     // torrent to ask.
     fileProgress: tracks.map((t) => ({
-      progress: t.verified ? 1 : 0,
-      downloaded: t.verified ? t.length : 0,
+      progress: t.verified || t.substituted ? 1 : 0,
+      downloaded: t.verified || t.substituted ? t.length : 0,
     })),
     state: record.state,
     live: false,
@@ -1190,11 +1400,13 @@ ipcMain.handle('get-library-tracks', (event, albumId) => {
       name: t.name,
       path: t.path,
       length: t.length,
-      verified: !!t.verified,
+      verified: !!(t.verified || t.substituted),
+      substituted: !!t.substituted,
       dur: t.dur != null ? t.dur : null,
       // Only for tracks actually present, so the renderer never points a media
       // element at a file that is not there.
-      localURL: t.verified ? fileServer.mediaUrl(record.id, t.i != null ? t.i : i) : null,
+      localURL:
+        t.verified || t.substituted ? fileServer.mediaUrl(record.id, t.i != null ? t.i : i) : null,
     })),
   };
 });
@@ -1233,7 +1445,7 @@ function artSourcesFor(albumId) {
   const imagePaths = [];
   const audioPaths = [];
   for (const track of record.tracks) {
-    if (!track.verified) continue;
+    if (!track.verified && !track.substituted) continue;
     const abs = path.join(record.root, track.path);
     if (IMAGE_ART_RE.test(track.name)) imagePaths.push(abs);
     else if (AUDIO_RE.test(track.name) && audioPaths.length < 3) audioPaths.push(abs);
@@ -1602,7 +1814,7 @@ ipcMain.handle('set-playback-state', (event, state) => {
   if (!torrentService.has(state.torrentId)) {
     const record = library.get(state.torrentId);
     const track = record && record.tracks[state.fileIndex];
-    if (record && (!track || !track.verified)) {
+    if (record && (!track || !(track.verified || track.substituted))) {
       torrentManager.ensureLive(state.torrentId, 'playback needs undownloaded bytes');
     }
   }
@@ -1629,6 +1841,7 @@ ipcMain.handle('probe-swarm', async (event, torrentId) => {
   // "not loaded", which read as a fault and left the user with nothing to do.
   if (!info) {
     if (!library.get(torrentId)) return { error: 'That album is not in the library.' };
+    if (hasSubstitutedTrack(library.get(torrentId))) return { error: SUBSTITUTED_REFUSAL };
     const woke = await torrentManager.ensureLive(torrentId, 'reachability check');
     if (!woke) {
       return {
@@ -1825,6 +2038,18 @@ ipcMain.handle('repair-track', async (event, albumId, fileIndex) => {
   if (!record) return { error: 'That album is not in the library.' };
   const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === fileIndex);
   if (!track) return { error: 'That track is not in the index.' };
+
+  // Never re-download over a file the user chose. That is the whole point of the
+  // flag, and this handler is the most direct way to destroy it.
+  if (track.substituted) {
+    return {
+      error:
+        'You replaced this track by hand, so re-downloading it would overwrite your ' +
+        'copy with the release’s damaged version. Delete the file first if that is ' +
+        'what you want.',
+      permanent: true,
+    };
+  }
 
   // A file that is simply absent is always worth fetching, even if a previous repair
   // concluded the release was damaged: there is nothing on disk to compare against,

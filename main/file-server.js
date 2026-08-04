@@ -136,8 +136,13 @@ function parseRange(header, size) {
  *   be tested without Electron or webtorrent — see scripts/range-check.js.
  * @param {function(string, string): string|null=} deps.resolveArt
  *   Maps an album id and variant onto an absolute path.
+ * @param {function(string, number): void=} deps.onMediaMissing
+ *   A media path resolved but is not on disk. Reported once per track.
+ * @param {function(string, number, number): void=} deps.onMediaSize
+ *   The size of a media file on disk, alongside the length resolveMedia declared.
+ *   Called once per (track, size) — a change in either direction is news.
  */
-function createFileServer({ resolveMedia, resolveArt, onMediaMissing }) {
+function createFileServer({ resolveMedia, resolveArt, onMediaMissing, onMediaSize }) {
   // Regenerated every launch. Without it any other local process could enumerate
   // the whole library by walking /media/<id>/0, /1, … — the loopback interface is
   // not a permission boundary.
@@ -164,6 +169,20 @@ function createFileServer({ resolveMedia, resolveArt, onMediaMissing }) {
       onMediaMissing(albumId, index);
     } catch (err) {
       console.warn('[file-server] missing-media handler threw:', err.message);
+    }
+  }
+
+  /** Same one-shot discipline as reportMissing, for the same reason. */
+  const reportedSize = new Set();
+  function reportSize(albumId, index, size) {
+    if (typeof onMediaSize !== 'function') return;
+    const key = albumId + '/' + index + '/' + size;
+    if (reportedSize.has(key)) return;
+    reportedSize.add(key);
+    try {
+      onMediaSize(albumId, index, size);
+    } catch (err) {
+      console.warn('[file-server] media-size handler threw:', err.message);
     }
   }
 
@@ -195,7 +214,7 @@ function createFileServer({ resolveMedia, resolveArt, onMediaMissing }) {
     return realTarget;
   }
 
-  async function serveFile(req, res, filePath, { immutable, kind }) {
+  async function serveFile(req, res, filePath, { immutable, kind, expectedLength, notifyLength }) {
     let stat;
     try {
       stat = await fsp.stat(filePath);
@@ -203,6 +222,12 @@ function createFileServer({ resolveMedia, resolveArt, onMediaMissing }) {
       return deny(res, 404, 'not found');
     }
     if (!stat.isFile()) return deny(res, 404, 'not a file');
+
+    // The size on disk, reported either way. A mismatch may mean the user replaced
+    // the file; a match may mean the release's own file is back and a previous
+    // substitution no longer holds. Both readings belong to the caller, which knows
+    // whether a torrent is mid-write. Free: the stat above already happened.
+    if (notifyLength && expectedLength > 0) notifyLength(stat.size);
 
     const size = stat.size;
     const range = parseRange(req.headers.range, size);
@@ -341,7 +366,12 @@ function createFileServer({ resolveMedia, resolveArt, onMediaMissing }) {
       }
       // It is back — forget the earlier report so a later disappearance is noticed.
       reportedMissing.delete(id + '/' + index);
-      return serveFile(req, res, filePath, { immutable: false, kind: 'media' });
+      return serveFile(req, res, filePath, {
+        immutable: false,
+        kind: 'media',
+        expectedLength: loc.length,
+        notifyLength: (size) => reportSize(id, index, size),
+      });
     }
 
     if (kind === 'art') {
