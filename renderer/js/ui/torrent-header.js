@@ -14,7 +14,11 @@
       parts.push('Complete');
     } else {
       parts.push(Math.round((t.progress || 0) * 100) + '%');
-      parts.push(t.numPeers ? t.numPeers + (t.numPeers === 1 ? ' peer' : ' peers') : 'no peers');
+      // "no peers" is only true of a torrent that is actually looking for them.
+      // Most of the library has no live torrent at any moment, and reporting that
+      // as zero peers reads as a swarm problem rather than as "asleep".
+      if (t.live === false) parts.push('queued');
+      else parts.push(t.numPeers ? t.numPeers + (t.numPeers === 1 ? ' peer' : ' peers') : 'no peers');
       // formatSpeed renders 0 as an em dash, which reads as "stalled" — that's
       // the intent, since downloadSpeed is a trailing average and genuinely
       // sits at zero between bursts.

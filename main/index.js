@@ -1527,8 +1527,22 @@ ipcMain.handle('set-playback-state', (event, state) => {
  * when the user asks and never on a timer.
  */
 ipcMain.handle('probe-swarm', async (event, torrentId) => {
-  const info = torrentService.getSwarmProbeInput(torrentId);
-  if (!info) return { error: 'That torrent is not loaded.' };
+  let info = torrentService.getSwarmProbeInput(torrentId);
+  // An album that is asleep is the normal case now, not an error — most of the
+  // library has no live torrent at any given moment. Asking about its swarm is an
+  // explicit user action, so bring it up and then answer, rather than reporting
+  // "not loaded", which read as a fault and left the user with nothing to do.
+  if (!info) {
+    if (!library.get(torrentId)) return { error: 'That album is not in the library.' };
+    const woke = await torrentManager.ensureLive(torrentId, 'reachability check');
+    if (!woke) {
+      return {
+        error: 'Could not bring this torrent up — the library folder may be unavailable.',
+      };
+    }
+    info = torrentService.getSwarmProbeInput(torrentId);
+    if (!info) return { error: 'That torrent came up without metadata — try again in a moment.' };
+  }
   try {
     return await swarmProbe.probe(info.infoHash, {
       trackers: info.trackers,

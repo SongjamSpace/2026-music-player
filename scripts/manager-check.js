@@ -168,6 +168,56 @@ async function main() {
     check('...most complete first', woken, ['dl5', 'dl4', 'dl3']);
   }
 
+  // -- a dormant album is reached even when the cap is full of live ones ---
+  {
+    // The regression this covers: `room` came from the live count while the
+    // candidate list still included the live albums, sorted furthest-along first.
+    // With the cap full of live torrents the batch was entirely albums that were
+    // already up, so a dormant one was never reached however often resume ran.
+    const woken = [];
+    const albums = [
+      album('live1', { complete: false, totalBytes: 100, presentBytes: 90 }),
+      album('live2', { complete: false, totalBytes: 100, presentBytes: 80 }),
+      album('dormant', { complete: false, totalBytes: 100, presentBytes: 13 }),
+    ];
+    const service = fakeService([torrent('live1'), torrent('live2')]);
+    const library = fakeLibrary(albums);
+    const mgr = createTorrentManager({
+      service, library,
+      wake: async (id) => { woken.push(id); service._add(torrent(id)); },
+    });
+
+    await mgr._resumeDownloads();
+    check('a dormant album is woken past the live ones', woken, ['dormant']);
+  }
+
+  // -- the sweep retries a download that never came up --------------------
+  {
+    // Resuming used to happen once, 2.5s after launch. A wake that failed then
+    // left the album dormant for the whole session with nothing to retry it.
+    let attempt = 0;
+    const service = fakeService([]);
+    const library = fakeLibrary([album('flaky', { complete: false })]);
+    const mgr = createTorrentManager({
+      service, library,
+      wake: async (id) => {
+        attempt++;
+        if (attempt === 1) throw new Error('swarm unreachable');
+        service._add(torrent(id));
+      },
+    });
+
+    await mgr._resumeDownloads();
+    check('the first attempt fails', service.has('flaky'), false);
+    // The backoff holds a failed album down, so an immediate sweep must not retry.
+    await mgr._sweep();
+    check('...the very next sweep backs off rather than hammering', attempt, 1);
+    // Past the backoff window, the sweep picks it up without a relaunch.
+    mgr._clearResumeBackoff();
+    await mgr._sweep();
+    check('...a later sweep retries and it comes up', service.has('flaky'), true);
+  }
+
   // -- a missing album is not woken ---------------------------------------
   {
     const woken = [];

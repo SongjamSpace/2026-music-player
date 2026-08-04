@@ -56,6 +56,8 @@ const UPLOAD_QUIET_MS = 60 * 1000;
 const SWEEP_MS = 60 * 1000;
 /** Wait this long after first paint before waking anything. */
 const RESUME_DELAY_MS = 2500;
+/** After a failed auto-resume, leave that album alone for this long. */
+const RESUME_RETRY_MS = 5 * 60 * 1000;
 
 /**
  * @param {object} deps
@@ -82,6 +84,8 @@ function createTorrentManager({ service, library, wake, canRun, onArchived }) {
   const liveSince = new Map();
   /** In-flight wakes, so two callers can't add the same torrent twice. */
   const waking = new Map();
+  /** publicId -> when an auto-resume last failed, so the sweep backs off. */
+  const resumeFailedAt = new Map();
 
   function allowed() {
     return !stopped && (typeof canRun !== 'function' || canRun());
@@ -226,34 +230,56 @@ function createTorrentManager({ service, library, wake, canRun, onArchived }) {
     for (const s of toArchive) {
       await archive(s.publicId, 'grace expired');
     }
+
+    // Then fill any downloading slots that are now free. Resuming used to happen
+    // once, 2.5s after launch, which meant a wake that failed — a dead swarm at
+    // that moment, a transient add error — left the album dormant for the entire
+    // session with nothing to retry it, and an album queued behind the cap never
+    // started even after a slot opened. An incomplete album should never be
+    // sitting still for longer than one sweep.
+    await resumeDownloads();
   }
 
   /**
-   * Wake the incomplete albums, up to the cap.
+   * Wake the incomplete albums that are not live, up to the cap.
    *
-   * After first paint, not during boot: the window opening should never wait on the
-   * torrent engine, and this used to be the single most expensive thing at startup
-   * because it also triggered SHA-1 re-verification of every partial album.
+   * Runs 2.5s after first paint and then on every sweep. After first paint, not
+   * during boot, because the window opening should never wait on the torrent
+   * engine — this used to be the single most expensive thing at startup, since it
+   * also triggered SHA-1 re-verification of every partial album.
+   *
+   * The already-live filter is load-bearing, not tidiness. `room` is computed from
+   * the live count while `incomplete` includes the live albums, and the sort puts
+   * the furthest-along first — which are exactly the ones already running. So with
+   * two live and one dormant, the batch was `[an album that is already live]`, and
+   * the dormant one was never reached no matter how many times this ran.
    */
   async function resumeDownloads() {
     if (!allowed()) return;
-    const incomplete = library
+    const now = Date.now();
+    const dormant = library
       .list()
-      .filter((a) => !a.complete && a.state !== 'missing')
+      .filter((a) => !a.complete && a.state !== 'missing' && !service.has(a.id))
+      // Back off from one that just refused, so a permanently broken album cannot
+      // put a wake attempt and a warning in the log every single sweep.
+      .filter((a) => now - (resumeFailedAt.get(a.id) || 0) >= RESUME_RETRY_MS)
       // Most nearly finished first: the fastest route to one fewer live torrent.
       .sort((a, b) => (b.presentBytes || 0) / (b.totalBytes || 1) - (a.presentBytes || 0) / (a.totalBytes || 1));
+    if (!dormant.length) return;
 
     const room = MAX_LIVE_DOWNLOADING - liveCounts().downloading;
-    const batch = incomplete.slice(0, Math.max(0, room));
+    const batch = dormant.slice(0, Math.max(0, room));
     if (!batch.length) return;
 
     console.log('[manager] resuming ' + batch.length + ' incomplete album(s)');
     for (const album of batch) {
-      await ensureLive(album.id, 'auto-resume');
+      const ok = await ensureLive(album.id, 'auto-resume');
+      if (ok) resumeFailedAt.delete(album.id);
+      else resumeFailedAt.set(album.id, Date.now());
     }
-    if (incomplete.length > batch.length) {
+    if (dormant.length > batch.length) {
       console.log(
-        '[manager] ' + (incomplete.length - batch.length) +
+        '[manager] ' + (dormant.length - batch.length) +
           ' more incomplete album(s) queued behind the live cap of ' + MAX_LIVE_DOWNLOADING
       );
     }
@@ -301,6 +327,7 @@ function createTorrentManager({ service, library, wake, canRun, onArchived }) {
       grace.delete(publicId);
       liveSince.delete(publicId);
       waking.delete(publicId);
+      resumeFailedAt.delete(publicId);
     },
 
     status() {
@@ -314,6 +341,7 @@ function createTorrentManager({ service, library, wake, canRun, onArchived }) {
     },
 
     /** Exposed for tests. */
+    _clearResumeBackoff: () => resumeFailedAt.clear(),
     _sweep: sweep,
     _resumeDownloads: resumeDownloads,
     _archivable: archivable,
