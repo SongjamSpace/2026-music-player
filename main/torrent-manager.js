@@ -68,12 +68,15 @@ const RESUME_RETRY_MS = 5 * 60 * 1000;
  *   because adding needs the IPC send functions that only main/index.js has.
  * @param {function(): boolean=} deps.canRun     False when the library root is
  *   unavailable, in which case nothing should be woken at all.
+ * @param {function(string): boolean=} deps.isPlaying
+ *   True while the renderer is playing this album. Archiving closes that torrent's
+ *   HTTP server, so doing it under an open stream kills playback mid-track.
  * @param {function(string): void=} deps.onArchived
  *   Called after an album goes to sleep. The renderer has to be told: it is still
  *   holding stream URLs for a server that has just been closed, and would otherwise
  *   keep pointing a media element at them.
  */
-function createTorrentManager({ service, library, wake, canRun, onArchived }) {
+function createTorrentManager({ service, library, wake, canRun, isPlaying, onArchived }) {
   let sweepTimer = null;
   let resumeTimer = null;
   let stopped = false;
@@ -179,12 +182,18 @@ function createTorrentManager({ service, library, wake, canRun, onArchived }) {
   /**
    * Whether this album can be put to sleep right now.
    *
-   * Three reasons not to: it is still downloading, it is inside its grace window, or
-   * it is mid-upload. The last one extends the window rather than blocking forever,
-   * because a popular album would otherwise never archive.
+   * Four reasons not to: it is still downloading, the user is listening to it, it
+   * is inside its grace window, or it is mid-upload. The last extends the window
+   * rather than blocking forever, because a popular album would otherwise never
+   * archive; the playback one is absolute, since there is an open stream to break.
    */
   function archivable(publicId, torrent, now) {
     if (!torrent.done) return false;
+    // Whatever the grace window says, not the album being listened to. A track
+    // streaming from this torrent holds a connection to its HTTP server, and
+    // closing that mid-track surfaces as a generic MediaError with nothing to
+    // point at — which is precisely how it was first reported.
+    if (typeof isPlaying === 'function' && isPlaying(publicId)) return false;
 
     const entry = grace.get(publicId);
     if (!entry) return true; // woken on demand, not freshly completed — no grace owed

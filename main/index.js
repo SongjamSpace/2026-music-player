@@ -330,6 +330,15 @@ let portFallback = null;
  */
 let libraryAvailable = true;
 
+/**
+ * The album the renderer is currently playing, or null.
+ *
+ * Kept here rather than asked of piecePolicy because it answers a different
+ * question — piecePolicy cares where the play head is, the manager only needs to
+ * know that this album must not be archived out from under an open stream.
+ */
+let playingAlbumId = null;
+
 function getPrefs() {
   return Object.assign({}, DEFAULT_PREFS, store.get('prefs', {}));
 }
@@ -959,6 +968,11 @@ const torrentManager = createTorrentManager({
   service: torrentService,
   library,
   canRun: () => libraryAvailable,
+  // Never take down the album the user is listening to. A track streaming from the
+  // torrent has an open connection to that torrent's HTTP server, and archiving
+  // closes it mid-track: the media element reports a bare MediaError, which the
+  // renderer used to render as "this format isn't supported".
+  isPlaying: (publicId) => publicId === playingAlbumId,
   wake: (publicId, record) => {
     // The magnet is what `add()` takes; the cached .torrent it prefers internally is
     // what makes waking instant and offline. An album with neither cannot be woken.
@@ -1500,9 +1514,12 @@ function schedulePriority(torrentId, current, next, pinned) {
  */
 ipcMain.handle('set-playback-state', (event, state) => {
   if (!state || state.torrentId == null) {
+    playingAlbumId = null;
     piecePolicy.setPlaybackState(null);
     return;
   }
+  // The manager consults this before archiving — see the note on `isPlaying`.
+  playingAlbumId = state.torrentId;
 
   // Playing something we do not have yet is the main reason to wake a torrent.
   //

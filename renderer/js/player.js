@@ -19,6 +19,10 @@
   // unplugged drive or a 503 from the file server all land here, and none of
   // them should burn the one retry for the rest of the session.
   var corsRetried = false;
+  // One source swap per track — see recoverSource(). Reset in play(), not on
+  // 'canplay': the swap itself produces a canplay, and resetting there would let
+  // two sources ping-pong on a file that is broken both ways.
+  var sourceRecovered = false;
 
   var WATCHDOG_MS = 12000;
   var PREV_RESTART_THRESHOLD = 3; // seconds
@@ -174,6 +178,7 @@
       return;
     }
 
+    sourceRecovered = false;
     var switchingTorrent = pb().torrentId !== torrentId;
     if (pendingQueue && pendingQueue.torrentId === torrentId) {
       queue = pb().shuffle ? shuffled(pendingQueue.indices, fileIndex) : pendingQueue.indices.slice();
@@ -500,8 +505,72 @@
     1: 'Playback was aborted.',
     2: 'Network error — the torrent stream dropped.',
     3: 'Could not decode this file. The downloaded data may be incomplete or corrupt.',
-    4: 'This format isn’t supported by the player.',
+    // Chromium reports code 4 for a source it could not load at all — a closed
+    // server, a 404, a refused range — as well as for one it cannot decode, and
+    // the first is far more common here. Claiming the format is unsupported sent
+    // one bug report chasing a FLAC that turned out to play perfectly.
+    4: 'Could not load this track — the source may be unavailable.',
   };
+
+  /**
+   * Swap to the album's other source after a load failure, once per track.
+   *
+   * A track can be reachable two ways: `localURL`, read straight off disk, and
+   * `streamURL`, served by that torrent's own HTTP server. The second one dies the
+   * moment the torrent is archived — which happens on a timer — so a track that
+   * started from the swarm can lose its source mid-play while the finished file is
+   * sitting on disk. Refreshing the album from main is what makes the URLs current;
+   * the store replaces the file list wholesale.
+   */
+  function recoverSource(media) {
+    var p = pb();
+    if (p.torrentId == null || p.fileIndex == null) return false;
+    if (sourceRecovered) return false;
+    sourceRecovered = true;
+
+    var failed = media.currentSrc || media.src;
+    var at = media.currentTime;
+
+    window.playerAPI
+      .getTorrents()
+      .then(function (list) {
+        (list || []).forEach(MP.store.upsertTorrent);
+        var t = MP.store.getTorrent(p.torrentId);
+        var file = t && t.files && t.files[p.fileIndex];
+        var next = file && (file.localURL || file.streamURL);
+        if (!next || next === failed) {
+          reportPlaybackError(media.error ? media.error.code : 0);
+          return;
+        }
+        console.warn('[player] source failed, retrying from', next === file.localURL ? 'disk' : 'the swarm');
+        media.src = next;
+        media.load();
+        if (at > 0) {
+          var restore = function () {
+            media.removeEventListener('loadedmetadata', restore);
+            try { media.currentTime = at; } catch (_) {}
+          };
+          media.addEventListener('loadedmetadata', restore);
+        }
+        media.play().catch(function () {});
+      })
+      .catch(function () {
+        reportPlaybackError(media.error ? media.error.code : 0);
+      });
+
+    return true;
+  }
+
+  function reportPlaybackError(code) {
+    var message = ERROR_MESSAGES[code] || 'Playback failed.';
+    MP.store.setPlayback({ isPlaying: false, isBuffering: false, error: message }, 'playback:state');
+    var torrentId = pb().torrentId;
+    MP.toast.error(message, {
+      action: torrentId
+        ? { label: 'Reveal in Finder', onClick: function () { MP.actions.openTorrentFolder(torrentId); } }
+        : null,
+    });
+  }
 
   function attach(media) {
     media.addEventListener('loadstart', function () {
@@ -617,14 +686,13 @@
         return;
       }
 
-      var message = ERROR_MESSAGES[code] || 'Playback failed.';
-      MP.store.setPlayback({ isPlaying: false, isBuffering: false, error: message }, 'playback:state');
-      var torrentId = pb().torrentId;
-      MP.toast.error(message, {
-        action: torrentId
-          ? { label: 'Reveal in Finder', onClick: function () { MP.actions.openTorrentFolder(torrentId); } }
-          : null,
-      });
+      // A source that vanished mid-track is the common cause of code 4, not a
+      // codec the player can't handle. Try the album's other source before
+      // reporting anything: a track streaming from a torrent that has since been
+      // archived usually has a perfectly good file on disk to fall back to.
+      if (recoverSource(media)) return;
+
+      reportPlaybackError(code);
     });
   }
 

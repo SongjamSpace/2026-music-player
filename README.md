@@ -244,6 +244,12 @@ The policy:
   live at a time, oldest archived first.
 - **An album that is actively uploading is never yanked.** The window extends while
   upload continues, up to a two-hour ceiling so a popular album cannot seed forever.
+- **The album being listened to is never archived**, whatever the window says.
+  Archiving closes that torrent's HTTP server, and a track streaming through it goes
+  silent mid-song reporting only a generic `MediaError` — which is how this was first
+  reported: as a complaint that one FLAC was an unsupported format, on a file that
+  plays perfectly. `player.js` also swaps to the album's other source once per track
+  before reporting anything, so a stream that dies falls back to the file on disk.
 - **Waking is lazy and deduplicated.** Playing a track that is not on disk wakes its
   album; three concurrent callers produce one `add()`, because WebTorrent errors on
   adding an infohash it already has.

@@ -168,6 +168,30 @@ async function main() {
     check('...most complete first', woken, ['dl5', 'dl4', 'dl3']);
   }
 
+  // -- never archive what is playing --------------------------------------
+  {
+    // Archiving closes that torrent's HTTP server. Doing it under a track that is
+    // streaming from it kills playback mid-song, and the media element reports
+    // only a generic MediaError — which is how this surfaced: as a complaint that
+    // a FLAC was an unsupported format, on a file that plays perfectly.
+    const service = fakeService([torrent('a', { done: true })]);
+    const library = fakeLibrary([album('a', { complete: true })]);
+    let playing = 'a';
+    const mgr = createTorrentManager({
+      service, library, wake: async () => {}, isPlaying: (id) => id === playing,
+    });
+    const t = service._live.get('a');
+    const past = Date.now() + SEED_GRACE_CEILING_MS + 1;
+
+    mgr.onComplete('a');
+    check('the album being played is never archivable', mgr._archivable('a', t, past), false);
+    await mgr._sweep();
+    check('...and the sweep leaves it alone', service.has('a'), true);
+
+    playing = null;
+    check('...archivable once playback moves on', mgr._archivable('a', t, past), true);
+  }
+
   // -- a dormant album is reached even when the cap is full of live ones ---
   {
     // The regression this covers: `room` came from the live count while the
