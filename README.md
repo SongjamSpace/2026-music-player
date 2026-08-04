@@ -322,8 +322,27 @@ webtorrent skips hashing, calls the album complete and re-downloads nothing.
 
 The cost is honest but real: webtorrent's verification is per-album, so repairing
 one track re-hashes the whole album and the album reads as incomplete until that
-finishes. On a 6 GB discography over USB that is minutes, which is why the toast
-says so.
+finishes. On a 6 GB discography over USB that is minutes cold, under a minute with
+the page cache warm.
+
+A file that is simply *gone* — deleted by hand, a folder renamed — is handled
+without being asked. The file server reports the 404 to main, which clears
+`verified`, drops the modtimes and wakes the torrent; the renderer says so and
+resumes the track once the bytes arrive. Three things that took a second pass:
+
+- Reacting to the 404 rather than sweeping at boot. A `stat` per track against USB
+  every launch is exactly the startup cost this design removed, and it would only
+  find what the next play attempt finds anyway.
+- `safeJoin` returns null both for a missing file and for a path that escapes the
+  album root. Only the first is reported — otherwise a crafted torrent file path
+  could drive an index write and a torrent wake from outside.
+- An unmounted drive 404s every track at once. The root is checked before anything
+  is marked, because those flags persist: a library that was merely unplugged would
+  otherwise come back claiming thousands of files needed re-downloading.
+
+The retry hangs off `torrent:files:<id>` as well as the progress topic. Progress
+alone was wrong — that ticker runs for live torrents only, so an album that failed
+to wake would never fire it and the retry would wait forever.
 
 Media and cover art have separate concurrency budgets, not one shared pool. They
 shared one at first, which meant a screen full of art could take every slot and a

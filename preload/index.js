@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld('playerAPI', {
   onRestoreMagnets: subscribe('restore-magnets'),
   onLibraryUnavailable: subscribe('library-unavailable'),
   onTorrentError: subscribe('torrent-error'),
+  onTrackMissing: subscribe('track-missing'),
   onNatStatus: subscribe('nat-status'),
   onMenuCommand: subscribe('menu-command'),
 });

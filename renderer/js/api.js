@@ -84,6 +84,7 @@
     api.onTorrentReady(function (d) { dispatch('torrent-ready', d); });
     api.onTorrentProgress(function (d) { dispatch('torrent-progress', d); });
     api.onTorrentError(function (d) { dispatch('torrent-error', d); });
+    api.onTrackMissing(function (d) { dispatch('track-missing', d); });
     api.onRestoreMagnets(function (d) { dispatch('restore-magnets', d); });
     api.onLibraryUnavailable(function (d) { dispatch('library-unavailable', d); });
     api.onMenuCommand(function (d) { dispatch('menu-command', d); });

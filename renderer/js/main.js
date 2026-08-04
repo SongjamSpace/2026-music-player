@@ -19,6 +19,13 @@
       MP.store.upsertTorrent(data);
     });
 
+    // A track the index claimed was on disk has gone. Main has already cleared the
+    // flag and put the torrent back up; the player says so and resumes when the
+    // bytes arrive.
+    MP.api.on('track-missing', function (data) {
+      MP.player.onTrackMissing(data);
+    });
+
     MP.api.on('torrent-error', function (data) {
       var message = (data && data.message) || 'Unknown torrent error';
       MP.tracklist.showBanner(message);

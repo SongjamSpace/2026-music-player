@@ -279,9 +279,80 @@ const fileServer = createFileServer({
     return { root: record.root, relPath: track.path };
   },
 
+  /**
+   * A track the index called verified is not on disk any more.
+   *
+   * The index is a cache of what the drive held when it was last written, and a
+   * file can leave without telling us: deleted by hand, a folder renamed, a drive
+   * remounted somewhere else. Nothing reconciled the two, so the file server went
+   * on advertising a local URL that could only 404, and the player reported that as
+   * an unspecified failure — with no way for the app to notice the obvious.
+   *
+   * Reacting to the 404 is enough, and it is free. A boot-time sweep would mean a
+   * `stat` per track against USB on every launch, which is the kind of startup cost
+   * the whole design exists to remove, and it would only find what the next play
+   * attempt finds anyway.
+   */
+  onMediaMissing: (albumId, index) => {
+    markTrackMissing(albumId, index).catch((err) =>
+      console.warn('[library] could not record a missing track:', err.message)
+    );
+  },
+
   /** Resized covers out of the art cache — see main/artwork.js. */
   resolveArt: (albumId, variant) => artwork.pathFor(albumId, variant),
 });
+
+/**
+ * Record that a verified track has gone from disk, and start getting it back.
+ *
+ * Clearing `verified` is what stops the file server offering a URL that cannot
+ * work; waking the torrent is what refills the gap. WebTorrent sees the file as
+ * absent, so it downloads it and leaves the album's other 241 files alone.
+ */
+async function markTrackMissing(albumId, index) {
+  const record = library.get(albumId);
+  if (!record) return;
+  const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === index);
+  if (!track || !track.verified) return; // already known, or never claimed
+
+  // An unplugged drive makes every track 404 at once. Marking them all unverified
+  // would be a false diagnosis with a lasting cost: the flags persist, so a library
+  // that is merely unmounted would come back claiming thousands of files need
+  // re-downloading. A missing *file* under a root that is still there is the only
+  // case this handles.
+  if (!record.root) return;
+  try {
+    await fsp.access(record.root);
+  } catch (_) {
+    console.warn('[library] not marking', track.name, 'missing — its root is unreachable');
+    return;
+  }
+
+  const tracks = record.tracks.map((t, i) =>
+    (t.i != null ? t.i : i) === index ? Object.assign({}, t, { verified: false }) : t
+  );
+  await library.patch(albumId, {
+    tracks: tracks,
+    complete: false,
+    presentBytes: Math.max(0, (record.presentBytes || 0) - (track.length || 0)),
+    state: 'downloading',
+  });
+  console.log('[library]', track.name, 'is gone from disk — re-fetching it');
+
+  // Same reason as repair-track: the modtimes cache asserts the files are untouched
+  // since they were verified, which is now false.
+  torrentService.forgetCachedModtimes(albumId);
+  if (record.realInfoHash) torrentService.forgetCachedModtimes(record.realInfoHash);
+  if (torrentService.has(albumId)) await torrentManager.archive(albumId, 'a file went missing');
+
+  const woke = await torrentManager.ensureLive(albumId, 'a verified file is missing');
+  send('torrent-ready', albumToTorrentShape(library.get(albumId)));
+  // Say what happened. Without this the renderer only sees a 404 and reports a
+  // generic failure, while the app is already busy fixing it — which reads as
+  // broken rather than as recovering.
+  send('track-missing', { albumId: albumId, fileIndex: index, name: track.name, live: woke });
+}
 
 const piecePolicy = createPiecePolicy({
   service: torrentService,
@@ -1755,7 +1826,20 @@ ipcMain.handle('repair-track', async (event, albumId, fileIndex) => {
   const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === fileIndex);
   if (!track) return { error: 'That track is not in the index.' };
 
-  if (track.repairedAt) {
+  // A file that is simply absent is always worth fetching, even if a previous repair
+  // concluded the release was damaged: there is nothing on disk to compare against,
+  // and refusing would leave a hole the app could never fill.
+  let onDisk = false;
+  if (record.root) {
+    try {
+      await fsp.access(path.join(record.root, track.path));
+      onDisk = true;
+    } catch (_) {
+      onDisk = false;
+    }
+  }
+
+  if (track.repairedAt && onDisk) {
     return {
       error:
         'Already re-downloaded this track on ' + String(track.repairedAt).slice(0, 10) +

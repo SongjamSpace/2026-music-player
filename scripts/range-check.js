@@ -60,6 +60,9 @@ async function main() {
   fs.writeFileSync(path.join(root, 'empty.flac'), Buffer.alloc(0));
   fs.writeFileSync(path.join(tmp, 'outside.flac'), Buffer.from('secret'));
 
+  // Records (albumId, index) pairs the server reports as gone from disk.
+  const missing = [];
+
   const server = createFileServer({
     resolveMedia: (id, index) => {
       if (id !== 'album1') return null;
@@ -67,8 +70,12 @@ async function main() {
       if (index === 1) return { root, relPath: 'empty.flac' };
       // Deliberate traversal attempt, as a bad torrent's file path would be.
       if (index === 2) return { root, relPath: '../outside.flac' };
+      // Resolvable, but deliberately never created: the index claiming a file that
+      // is no longer on disk is exactly the case onMediaMissing exists for.
+      if (index === 3) return { root, relPath: 'deleted.flac' };
       return null;
     },
+    onMediaMissing: (id, index) => missing.push([id, index]),
     resolveArt: (id, variant) => (variant === 'thumb' ? path.join(root, 'track.flac') : null),
   });
 
@@ -192,6 +199,47 @@ async function main() {
     check('...art is cached hard', /immutable/.test(r.headers['cache-control'] || ''), true);
     const r2 = await request(base + '/art/album1/hero');
     check('unknown art variant → 404', r2.status, 404);
+  }
+
+  // -- a resolvable track that is not on disk ------------------------------
+  {
+    // The index is a cache of what the drive held when it was written, so a file can
+    // leave without telling us. The server is the first thing to find out, and it is
+    // the only place that can tell "the index never claimed this" (index 99, no
+    // callback) from "the index claimed it and it is gone" (index 3, callback).
+    missing.length = 0;
+    const r = await request(base + '/media/album1/3');
+    check('a resolvable path that is not on disk → 404', r.status, 404);
+    check('...and it is reported once', JSON.stringify(missing), '[["album1",3]]');
+
+    // Chromium issues several requests per file; the report must not fan out into
+    // one index write and one torrent wake per request.
+    await request(base + '/media/album1/3');
+    await request(base + '/media/album1/3');
+    check('...still once after three requests', missing.length, 1);
+
+    // An unresolvable index (never claimed) is a different thing and stays quiet.
+    missing.length = 0;
+    await request(base + '/media/album1/99');
+    check('an unknown track is not reported as missing', missing.length, 0);
+
+    // A path that escapes the album root is a bad torrent, not a deleted file. It
+    // must not be reportable, or a crafted file path could drive an index write and
+    // a torrent wake from outside.
+    missing.length = 0;
+    await request(base + '/media/album1/2');
+    check('a traversal attempt is not reported as missing', missing.length, 0);
+
+    // The file comes back — a re-download — and then goes again. The second
+    // disappearance has to be noticed, or the guard would suppress it forever.
+    fs.writeFileSync(path.join(root, 'deleted.flac'), bytes);
+    missing.length = 0;
+    const back = await request(base + '/media/album1/3');
+    check('once the file exists it is served normally', back.status, 200);
+    check('...and serving it reported nothing', missing.length, 0);
+    fs.unlinkSync(path.join(root, 'deleted.flac'));
+    await request(base + '/media/album1/3');
+    check('...a second disappearance is reported again', missing.length, 1);
   }
 
   // -- art cannot starve media --------------------------------------------

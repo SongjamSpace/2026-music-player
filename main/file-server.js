@@ -137,7 +137,7 @@ function parseRange(header, size) {
  * @param {function(string, string): string|null=} deps.resolveArt
  *   Maps an album id and variant onto an absolute path.
  */
-function createFileServer({ resolveMedia, resolveArt }) {
+function createFileServer({ resolveMedia, resolveArt, onMediaMissing }) {
   // Regenerated every launch. Without it any other local process could enumerate
   // the whole library by walking /media/<id>/0, /1, … — the loopback interface is
   // not a permission boundary.
@@ -146,6 +146,26 @@ function createFileServer({ resolveMedia, resolveArt }) {
   let server = null;
   let baseUrl = null;
   const open = { media: 0, art: 0 };
+
+  /**
+   * Tell the caller a resolvable track was not on disk, at most once per track.
+   *
+   * Chromium fires several requests for one file, so without the guard a single
+   * failed play would trigger the same index write and the same torrent wake three
+   * or four times over.
+   */
+  const reportedMissing = new Set();
+  function reportMissing(albumId, index) {
+    if (typeof onMediaMissing !== 'function') return;
+    const key = albumId + '/' + index;
+    if (reportedMissing.has(key)) return;
+    reportedMissing.add(key);
+    try {
+      onMediaMissing(albumId, index);
+    } catch (err) {
+      console.warn('[file-server] missing-media handler threw:', err.message);
+    }
+  }
 
   function deny(res, code, message) {
     res.writeHead(code, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
@@ -308,7 +328,19 @@ function createFileServer({ resolveMedia, resolveArt }) {
       const loc = resolveMedia(id, index);
       if (!loc) return deny(res, 404, 'unknown track');
       const filePath = await safeJoin(loc.root, loc.relPath);
-      if (!filePath) return deny(res, 404, 'not found');
+      if (!filePath) {
+        // safeJoin returns null for two different things, and only one of them is
+        // worth acting on. A path that escapes the album root is a bad torrent, and
+        // reporting it as missing would let a crafted file path trigger an index
+        // write and a torrent wake. A lexical containment check separates them: if
+        // the path does belong under the root, null means the file is simply gone.
+        const resolved = path.resolve(loc.root, loc.relPath);
+        const rootPrefix = path.resolve(loc.root) + path.sep;
+        if (resolved.startsWith(rootPrefix)) reportMissing(id, index);
+        return deny(res, 404, 'not found');
+      }
+      // It is back — forget the earlier report so a later disappearance is noticed.
+      reportedMissing.delete(id + '/' + index);
       return serveFile(req, res, filePath, { immutable: false, kind: 'media' });
     }
 

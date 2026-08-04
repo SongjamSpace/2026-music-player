@@ -561,6 +561,54 @@
     return true;
   }
 
+  /**
+   * A track we thought was on disk isn't, and main has started fetching it.
+   *
+   * Nothing to do but say so and wait: the album is live now, so the file gains a
+   * `streamURL` as soon as the torrent has metadata, and the first bytes are
+   * prioritised because this is the track someone just asked for. One retry, on a
+   * store update rather than a timer, so it starts as soon as it can rather than
+   * after a guessed delay.
+   */
+  function onTrackMissing(info) {
+    if (!info) return;
+    var p = pb();
+    var forThisTrack = p.torrentId === info.albumId && p.fileIndex === info.fileIndex;
+
+    MP.toast.show(
+      '“' + info.name + '” is no longer on the drive' +
+        (info.live ? ' — downloading it again.' : ', and the torrent could not be started.')
+    );
+    if (!forThisTrack || !info.live) return;
+
+    MP.store.setPlayback({ error: 'Missing from the drive — downloading it again.' }, 'playback:state');
+
+    // Two triggers, because either can be the one that makes the track playable.
+    // `torrent:files:` fires when main re-sends the album and the URLs change, which
+    // is what happens the moment the torrent goes live. `torrent:progress:` covers
+    // an album that was already live. Subscribing only to progress was wrong: the
+    // ticker runs for live torrents only, so an album that failed to wake would
+    // never fire it and the retry would wait forever.
+    var stops = [];
+    var stop = function () {
+      stops.forEach(function (fn) { fn(); });
+      stops = [];
+    };
+    var attempt = function () {
+      var t = MP.store.getTorrent(info.albumId);
+      var file = t && t.files && t.files[info.fileIndex];
+      if (!file || !(file.localURL || file.streamURL)) return;
+      stop();
+      // Only if the user is still waiting on this track — they may have moved on.
+      var now = pb();
+      if (now.torrentId !== info.albumId || now.fileIndex !== info.fileIndex) return;
+      play(info.albumId, info.fileIndex);
+    };
+    stops.push(MP.store.subscribe('torrent:files:' + info.albumId, attempt));
+    stops.push(MP.store.subscribe('torrent:progress:' + info.albumId, attempt));
+    attempt();
+  }
+
   function reportPlaybackError(code, media) {
     var p = pb();
     var t = p.torrentId != null ? MP.store.getTorrent(p.torrentId) : null;
@@ -772,6 +820,7 @@
     syncPriority: syncPriority,
     activeMedia: activeMedia,
     reloadCurrent: reloadCurrent,
+    onTrackMissing: onTrackMissing,
     bufferedEnd: bufferedEnd,
     isVideoActive: function () { return active === video; },
   };
