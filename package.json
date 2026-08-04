@@ -9,7 +9,7 @@
     "dev": "electron .",
     "icon": "node scripts/make-icon.js",
     "postinstall": "node scripts/patch-deps.js",
-    "check": "node scripts/patch-deps.js --check && node scripts/pe-handshake-check.js && node scripts/selection-check.js && node scripts/album-grouping-check.js && node scripts/library-cost-check.js && node scripts/library-root-check.js && node scripts/range-check.js && node scripts/library-check.js && node scripts/manager-check.js && node scripts/title-check.js && node scripts/repair-check.js",
+    "check": "node scripts/patch-deps.js --check && node scripts/pe-handshake-check.js && node scripts/selection-check.js && node scripts/album-grouping-check.js && node scripts/library-cost-check.js && node scripts/library-root-check.js && node scripts/range-check.js && node scripts/library-check.js && node scripts/manager-check.js && node scripts/title-check.js && node scripts/repair-check.js && node scripts/window-state-check.js",
     "mem": "node scripts/mem-check.js --vmmap",
     "build": "node scripts/patch-deps.js --check && npm run icon && node scripts/build-app.js",
     "install-app": "npm run build && rm -rf '/Applications/2026 Music Player.app' && cp -R 'dist/2026 Music Player-darwin-arm64/2026 Music Player.app' /Applications/",

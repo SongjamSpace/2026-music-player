@@ -1,5 +1,5 @@
 const {
-  app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, nativeImage, session, shell,
+  app, BrowserWindow, Menu, crashReporter, dialog, ipcMain, nativeImage, screen, session, shell,
 } = require('electron');
 const fs = require('fs');
 // Async FS for anything that touches the download root: it lives on an external
@@ -24,6 +24,7 @@ const { createFileServer } = require('./file-server');
 const { createLibrary } = require('./library');
 const { importFromMagnets, classifyTrackFile } = require('./library-import');
 const repair = require('./repair');
+const windowState = require('./window-state');
 const { createTorrentManager } = require('./torrent-manager');
 const { createArtwork } = require('./artwork');
 const nat = require('./nat');
@@ -742,10 +743,67 @@ function send(channel, payload) {
   }
 }
 
+/** Trailing-edge debounce. Small enough not to warrant a dependency. */
+function debounce(fn, ms) {
+  let timer = null;
+  return function () {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn();
+    }, ms);
+    if (timer.unref) timer.unref();
+  };
+}
+
+/**
+ * Remember where the window was, so it reopens there.
+ *
+ * Debounced, and on a top-level store key rather than inside `prefs`: prefs is
+ * written wholesale by the renderer via set-pref, and a resize landing between that
+ * read and its write would be lost.
+ */
+/**
+ * The last geometry the window reported while it still existed.
+ *
+ * Kept in memory because by the time `before-quit` runs the window is often already
+ * closed and destroyed, and asking a destroyed window for its bounds returns nothing.
+ * Reading it live at quit time looked correct and silently saved `null` — the position
+ * only survived if a resize happened to be more than 400ms before the quit.
+ */
+let lastWindowState = null;
+
+function captureWindowState() {
+  const state = windowState.stateToSave(mainWindow);
+  if (state) lastWindowState = state;
+}
+
+function persistWindowState() {
+  captureWindowState();
+  const state = lastWindowState;
+  if (!state) return;
+  const prev = store.get('window', null);
+  // electron-store rewrites the whole file synchronously on set, so skip a write that
+  // would change nothing — a drag produces a lot of identical tail values.
+  if (prev && ['x', 'y', 'width', 'height', 'maximized'].every((k) => prev[k] === state[k])) return;
+  store.set('window', state);
+}
+
 function createWindow() {
+  const placement = windowState.chooseBounds(
+    store.get('window', null),
+    screen.getAllDisplays()
+  );
+  console.log(
+    '[window] ' + placement.width + 'x' + placement.height +
+      ' at ' + placement.x + ',' + placement.y + ' — ' + placement.reason
+  );
+
   mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 780,
+    x: placement.x,
+    y: placement.y,
+    width: placement.width,
+    height: placement.height,
     minWidth: 860,
     minHeight: 560,
     backgroundColor: '#0d0d0f',
@@ -761,6 +819,24 @@ function createWindow() {
       additionalArguments: ['--mp-theme=' + getPrefs().theme],
     },
   });
+
+  if (placement.maximized) mainWindow.maximize();
+
+  // 400ms after the last move or resize. `move` fires per frame of a drag, and each
+  // write is a synchronous rewrite of config.json.
+  const saveSoon = debounce(persistWindowState, 400);
+  ['resize', 'move', 'maximize', 'unmaximize'].forEach((evt) =>
+    mainWindow.on(evt, () => {
+      // Capture now, write later. `move` fires per frame of a drag and each write is a
+      // synchronous rewrite of config.json, but reading bounds is free — and it is the
+      // reading that has to happen while the window is still alive.
+      captureWindowState();
+      saveSoon();
+    })
+  );
+  // And once more on the way out, because the last drag may still be pending and a
+  // quit cancels the timer.
+  mainWindow.on('close', persistWindowState);
 
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
 
@@ -1120,6 +1196,10 @@ async function shutdown() {
 app.on('before-quit', (event) => {
   if (shuttingDown) return; // second pass — let Electron finish the quit
   shuttingDown = true;
+  // Before anything is torn down, and here rather than only on the window's `close`:
+  // a quit closes the window without emitting `close` in every path, and the debounce
+  // means a resize in the last 400ms would otherwise be lost.
+  persistWindowState();
   event.preventDefault();
   console.log('[shutdown] releasing port mappings…');
   // Never leave this un-caught: if teardown rejects, the app hangs with no

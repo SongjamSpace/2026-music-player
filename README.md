@@ -298,6 +298,41 @@ for a partially written file would play silence or noise. `torrent.done` is O(1)
 covers a finished album; individual files fall back to the memo the progress ticker
 already maintains.
 
+### Where the window opens
+
+Electron with no `x`/`y` centres on whichever display macOS calls primary, at a fixed
+1180×780 — so on a multi-display desk the app opened small, on the wrong screen, every
+launch. `main/window-state.js` decides instead:
+
+1. reopen where it was last closed, if that place still exists;
+2. otherwise fill the **leftmost** display's work area.
+
+Rule 1 has to be conditional, and that is why this is a module with a harness rather
+than four lines in `createWindow`. Saved coordinates describe an arrangement that may
+be gone — unplug the monitor the window was on and restoring puts it somewhere with no
+screen, invisible and impossible to drag back. The test is what fraction of the window
+lands on *any* display, summed rather than best-of, because a window deliberately
+straddling two screens is fully visible and must not be moved. Below 30% it is treated
+as lost.
+
+`workArea`, not `bounds`, so the window sits under the menu bar rather than behind it.
+Normal bounds are saved, never the maximized rectangle — that would restore a window
+that cannot be un-maximized to anything sensible. Full screen is deliberately not
+remembered: `F` toggles it for video, and reopening into it hides the traffic lights.
+
+Two things learned in verification, both about *when* the state can be read:
+
+- Bounds are captured in memory on every move and resize, and only written to disk
+  debounced. Reading at quit time looked right and silently saved `null` — by
+  `before-quit` the window is already destroyed, so a resize inside the last 400ms
+  was lost.
+- The write is skipped when nothing changed. `move` fires per frame of a drag and
+  every `store.set` is a synchronous rewrite of `config.json`.
+
+`scripts/window-state-check.js` describes arrangements as rectangles, so a monitor
+being unplugged between launches — the failure that matters — is testable without
+three monitors.
+
 ### Track order
 
 Album *grouping* reads folders; track order reads filenames. They are independent, and
