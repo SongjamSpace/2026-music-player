@@ -143,7 +143,11 @@
 
     var next = {
       id: id,
-      name: pick('name') || (existing && existing.name) || id,
+      // Decoded here rather than at each display site: this is the only place a
+      // name enters the store, and it arrives from three sources — a magnet's
+      // `dn=`, the torrent metadata, and the library index — of which the first is
+      // routinely scraped out of HTML and carries entities like `&rsquo;`.
+      name: window.MP.util.decodeEntities(pick('name') || (existing && existing.name)) || id,
       magnetURI: pick('magnetURI'),
       files: files || [],
       mediaCount: mediaCount,

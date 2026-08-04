@@ -1316,7 +1316,14 @@ async function findLocalFolder(torrentId) {
 
   // The folder on disk comes from the .torrent's name, which can differ from
   // the magnet's display name, so fall back to a loose match.
-  const normalise = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  //
+  // Entities are dropped, not decoded. A scraped `dn=` carries them where the
+  // folder has the real character — `Isn&rsquo;t` against `Isn’t` — and since this
+  // comparison discards punctuation anyway, removing the whole `&…;` leaves
+  // `isntitnow` on both sides. Decoding would need an entity table here purely to
+  // throw the result away.
+  const normalise = (s) =>
+    s.toLowerCase().replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/g, '').replace(/[^a-z0-9]/g, '');
   const target = normalise(name);
   const hit = (await listDownloadRoot()).find((dirName) => {
     const n = normalise(dirName);

@@ -151,6 +151,58 @@
     return m ? m[1].toLowerCase() : null;
   }
 
+  // Enough to cover what turns up in scraped release titles. Anything not listed
+  // is left exactly as it was found, which is the safe direction: a name is only
+  // ever displayed, so an undecoded entity is ugly whereas a wrong guess is a lie.
+  var NAMED_ENTITIES = {
+    quot: '"', apos: "'", lsquo: '‘', rsquo: '’',
+    ldquo: '“', rdquo: '”', sbquo: '‚', bdquo: '„',
+    ndash: '–', mdash: '—', hellip: '…', nbsp: ' ',
+    middot: '·', bull: '•', deg: '°', trade: '™',
+    copy: '©', reg: '®', eacute: 'é', amp: '&', lt: '<', gt: '>',
+  };
+
+  /**
+   * Turn HTML entities in a *display* string back into characters.
+   *
+   * Magnet `dn=` values are routinely scraped straight out of a web page, so an
+   * apostrophe arrives as `&rsquo;` and shows up literally in the UI — every
+   * title in this app is set through `textContent`, which is what stops markup in
+   * a torrent name being markup, and also what stops an entity being decoded.
+   *
+   * Deliberately a table and a regex rather than round-tripping through
+   * `innerHTML` or a detached textarea. Parsing attacker-supplied text as HTML to
+   * read it back out is how injection bugs happen, and a torrent name is
+   * attacker-supplied. This cannot execute anything.
+   *
+   * One pass, left to right, so `&amp;rsquo;` decodes to the literal `&rsquo;`
+   * rather than to an apostrophe: the `&amp;` is consumed first and the scan
+   * resumes after it.
+   *
+   * Never use on a filesystem path — the bytes on disk are whatever they are.
+   */
+  function decodeEntities(text) {
+    if (text == null) return text;
+    var s = String(text);
+    if (s.indexOf('&') === -1) return s;
+    return s.replace(/&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,8});/g, function (whole, body) {
+      if (body.charAt(0) !== '#') {
+        var named = NAMED_ENTITIES[body.toLowerCase()];
+        return named === undefined ? whole : named;
+      }
+      var hex = body.charAt(1) === 'x' || body.charAt(1) === 'X';
+      var cp = parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10);
+      // Lone surrogates and C0 controls are not worth reconstructing from a title.
+      if (!isFinite(cp) || cp < 32 || cp > 0x10ffff) return whole;
+      if (cp >= 0xd800 && cp <= 0xdfff) return whole;
+      try {
+        return String.fromCodePoint(cp);
+      } catch (_) {
+        return whole;
+      }
+    });
+  }
+
   /**
    * The `dn=` display name, if the magnet carries one. Gives a pending row a
    * real title instead of a placeholder while metadata is still being fetched.
@@ -159,7 +211,7 @@
     var m = /[?&]dn=([^&]+)/.exec(magnetUri || '');
     if (!m) return null;
     try {
-      return decodeURIComponent(m[1].replace(/\+/g, ' ')).trim() || null;
+      return decodeEntities(decodeURIComponent(m[1].replace(/\+/g, ' ')).trim()) || null;
     } catch (_) {
       return null;
     }
@@ -279,6 +331,7 @@
     extractMagnet: extractMagnet,
     parseInfoHash: parseInfoHash,
     parseDisplayName: parseDisplayName,
+    decodeEntities: decodeEntities,
     isVideoFile: isVideoFile,
     isAudioFile: isAudioFile,
     isImageFile: isImageFile,
