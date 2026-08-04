@@ -19,7 +19,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
-const { createFileServer, parseRange } = require('../main/file-server');
+const { createFileServer, parseRange, MAX_ART_STREAMS } = require('../main/file-server');
 
 const SIZE = 5000;
 
@@ -192,6 +192,20 @@ async function main() {
     check('...art is cached hard', /immutable/.test(r.headers['cache-control'] || ''), true);
     const r2 = await request(base + '/art/album1/hero');
     check('unknown art variant → 404', r2.status, 404);
+  }
+
+  // -- art cannot starve media --------------------------------------------
+  {
+    // The two kinds used to share one budget, so a screen full of cover art could
+    // take every slot and a media read would answer 503 — which Chromium reports
+    // as a generic media error, and the renderer then blamed on CORS. Saturate art
+    // and assert playback is still served.
+    const held = [];
+    for (let i = 0; i < MAX_ART_STREAMS + 2; i++) held.push(request(base + '/art/album1/thumb'));
+    const media = await request(base + '/media/album1/0', { headers: { Range: 'bytes=0-99' } });
+    check('media is served while art is saturated', media.status, 206);
+    check('...and the bytes are right', media.body.equals(bytes.subarray(0, 100)), true);
+    await Promise.all(held);
   }
 
   // -- parseRange unit cases ----------------------------------------------

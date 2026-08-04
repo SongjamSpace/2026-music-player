@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- img-src and media-src both need the loopback wildcard: cover art and audio
        are served by the same per-torrent HTTP server, each on a random port. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: http://127.0.0.1:*; media-src http://127.0.0.1:* blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: http://127.0.0.1:*; media-src http://127.0.0.1:* blob:; connect-src 'self' http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none';">
   <title>2026 Music Player</title>
 
   <link rel="stylesheet" href="css/tokens.primitives.css">

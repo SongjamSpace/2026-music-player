@@ -15,6 +15,19 @@
   var probing = false;
   var audioEl = null;
   var videoEl = null;
+  var lastReason = null;   // why the last probe failed, for the panel banner
+  var probeAttempts = 0;
+  var lastProbeURL = null;
+
+  // A probe failure is a runtime observation, not a property of the machine, so
+  // it is never persisted — see finishProbe(). Retrying a couple of times per
+  // session costs a silent background element and covers the transient cases
+  // (a track that opens on silence, a drive busy enough that four seconds of
+  // audio never arrives) without ever pinning the effects off for good.
+  var MAX_PROBE_ATTEMPTS = 3;
+  // Long enough for a quiet intro on a busy external drive. The probe element is
+  // never connected to destination, so waiting costs nothing audible.
+  var PROBE_TIMEOUT_MS = 8000;
 
   function get() {
     return state;
@@ -42,8 +55,48 @@
     console.warn('[dsp] disabling cross-origin media:', reason);
     state.corsOk = false;
     available = false;
+    lastReason = reason;
     saveNow();
-    MP.store.emit('dsp:availability', { available: false, reason: reason });
+    MP.store.emit('dsp:availability', { available: false, reason: reason, retriable: true });
+  }
+
+  /** Everything the UI needs to describe the state of the chain. */
+  function status() {
+    return {
+      available: available,
+      corsOk: state ? state.corsOk : null,
+      probing: probing,
+      // "We tried and it did not work", as opposed to "nothing has played yet".
+      failed: !available && (probeAttempts > 0 || (!!state && state.corsOk === false)),
+      reason: lastReason,
+    };
+  }
+
+  /**
+   * Re-run the probe from scratch, clearing any persisted verdict.
+   *
+   * The media element has to be reloaded, not just re-probed: `crossorigin` is
+   * only read when `.src` is assigned, so an element that loaded without it
+   * stays tainted for its whole life, and `createMediaElementSource` cannot be
+   * undone once it has adopted one.
+   */
+  function retry() {
+    if (probing) return false;
+    if (state && state.corsOk === false) {
+      state.corsOk = null;
+      saveNow();
+    }
+    probeRan = false;
+    probeAttempts = 0;
+    lastReason = null;
+    available = false;
+    MP.store.emit('dsp:availability', { available: false, reason: null, retrying: true });
+    // play() sets crossorigin from wantCrossOrigin(), which is true again now,
+    // and calls onPlay() — which is what actually re-probes.
+    if (MP.player.reloadCurrent()) return true;
+    lastReason = 'play a track first';
+    MP.store.emit('dsp:availability', { available: false, reason: lastReason });
+    return false;
   }
 
   /**
@@ -57,6 +110,8 @@
   function probe(streamURL) {
     if (probeRan || probing || !streamURL) return Promise.resolve(available);
     probing = true;
+    probeAttempts++;
+    lastProbeURL = streamURL;
 
     var ctx = MP.dspGraph.ensure();
     var el = new Audio();
@@ -112,7 +167,7 @@
                 }
               }
             }
-            if (waited >= 4000) {
+            if (waited >= PROBE_TIMEOUT_MS) {
               clearInterval(timer);
               resolve(false);
             }
@@ -133,15 +188,34 @@
       });
   }
 
+  /**
+   * `ok` is a fact about this playback attempt, not about the machine.
+   *
+   * It used to be written straight into `state.corsOk`, which is persisted and
+   * which `onPlay()` checks before probing at all — so one failure disabled the
+   * effects chain permanently, across every future launch, with nothing in the
+   * UI to undo it. `corsOk` now means only "is it safe to request media with
+   * crossorigin", and only a confirmed cross-origin rejection sets it (see
+   * disableCrossOrigin). Everything else retries.
+   */
   function finishProbe(ok, reason) {
-    state.corsOk = ok;
-    saveNow();
     if (!ok) {
       available = false;
-      console.warn('[dsp] audio effects unavailable:', reason);
-      MP.store.emit('dsp:availability', { available: false, reason: reason });
+      lastReason = reason;
+      console.warn(
+        '[dsp] audio effects unavailable:', reason,
+        '(attempt ' + probeAttempts + ' of ' + MAX_PROBE_ATTEMPTS + ')'
+      );
+      // Let the next track try again. probeRan stays false so onPlay() re-enters.
+      if (probeAttempts < MAX_PROBE_ATTEMPTS) probeRan = false;
+      MP.store.emit('dsp:availability', {
+        available: false,
+        reason: reason,
+        retriable: probeAttempts < MAX_PROBE_ATTEMPTS,
+      });
       return false;
     }
+    lastReason = null;
     MP.dspGraph.attachSources(audioEl, videoEl);
     available = true;
     MP.dspGraph.applyAll(state, { regenerateIr: state.reverb.on });
@@ -440,6 +514,8 @@
     init: init,
     get: get,
     isAvailable: isAvailable,
+    status: status,
+    retry: retry,
     setElements: setElements,
     onPlay: onPlay,
     wantCrossOrigin: wantCrossOrigin,

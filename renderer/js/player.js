@@ -13,11 +13,11 @@
   var watchdog = null;
   var lastTimeAt = 0;
   var lastPositionSync = 0; // play head last reported to main, in seconds
-  // Not keyed by src, deliberately. The CORS parachute below calls
-  // MP.dsp.disableCrossOrigin(), which persists `corsOk: false` and makes
-  // wantCrossOrigin() return false for good — so `crossOrigin` is never set on a
-  // media element again and the retry can happen at most once per install. A map
-  // keyed on src implied otherwise while growing an entry per errored URL forever.
+  // Guards the CORS parachute below against retrying the same failure forever.
+  // Reset once a track actually plays, because a media error is no longer a
+  // once-per-install event: a stale streamURL from an archived torrent, an
+  // unplugged drive or a 503 from the file server all land here, and none of
+  // them should burn the one retry for the rest of the session.
   var corsRetried = false;
 
   var WATCHDOG_MS = 12000;
@@ -25,6 +25,56 @@
 
   function pb() {
     return MP.store.state.playback;
+  }
+
+  /**
+   * Decide, after the fact, whether a media error was really a CORS rejection.
+   *
+   * `MediaError` is uselessly coarse here: a cross-origin refusal, a 404 for a
+   * track whose torrent has been archived, a 503 from the file server and an
+   * unplugged drive all arrive as the same code. Acting on the code alone meant
+   * one unrelated load failure persisted `corsOk: false` and killed the effects
+   * chain for every future launch, with no way back.
+   *
+   * A cross-origin `fetch` of the same URL answers the question directly: if it
+   * completes, the ACAO header landed and CORS was never the problem. A non-2xx
+   * status means the resource is gone, which is a different bug.
+   *
+   * A rejected fetch is still ambiguous — an unreachable server and a refused
+   * cross-origin read both throw `TypeError` — so it is followed by a `no-cors`
+   * request, which is exempt from the ACAO check. That one succeeding (opaque)
+   * where the CORS one failed is the only evidence that actually implicates CORS.
+   */
+  function confirmCorsFailure(src, code) {
+    if (!src) return;
+    var opts = { method: 'GET', headers: { Range: 'bytes=0-0' }, cache: 'no-store' };
+    fetch(src, Object.assign({ mode: 'cors' }, opts))
+      .then(function (res) {
+        if (res.ok || res.status === 206 || res.status === 416) {
+          console.warn(
+            '[player] media error code ' + code + ' but the URL is CORS-readable — ' +
+              'not a CORS problem, leaving audio effects enabled'
+          );
+          return;
+        }
+        console.warn('[player] media error code ' + code + ' — server said ' + res.status);
+      })
+      .catch(function (corsErr) {
+        return fetch(src, Object.assign({ mode: 'no-cors' }, opts)).then(
+          function () {
+            // Reachable without the CORS check, refused with it.
+            MP.dsp.disableCrossOrigin(
+              'cross-origin read refused (' + ((corsErr && corsErr.message) || 'fetch failed') + ')'
+            );
+          },
+          function () {
+            console.warn(
+              '[player] media error code ' + code + ' and the URL is unreachable — ' +
+                'not a CORS problem, leaving audio effects enabled'
+            );
+          }
+        );
+      });
   }
 
   function activeMedia() {
@@ -178,6 +228,31 @@
     syncPriority();
     updateMediaSession(t, file);
     if (MP.store.state.selectedTorrentId !== torrentId) MP.store.select(torrentId);
+  }
+
+  /**
+   * Reload the current track from the current position.
+   *
+   * Only used by the "try again" action on the effects banner. The element's
+   * `crossorigin` attribute can only be changed before `.src` is assigned, so
+   * re-enabling effects after they were switched off means starting the load
+   * over — there is no way to adopt an element that was already loaded without
+   * it. Returns false if there is nothing playing to reload.
+   */
+  function reloadCurrent() {
+    var p = pb();
+    if (p.torrentId == null || p.fileIndex == null) return false;
+    var at = active ? active.currentTime : 0;
+    play(p.torrentId, p.fileIndex);
+    if (at > 0 && active) {
+      var el = active;
+      var restore = function () {
+        el.removeEventListener('loadedmetadata', restore);
+        try { el.currentTime = at; } catch (_) {}
+      };
+      el.addEventListener('loadedmetadata', restore);
+    }
+    return true;
   }
 
   function playAll(torrentId, shuffle) {
@@ -453,6 +528,8 @@
       media.addEventListener(evt, function () {
         if (media !== active) return;
         clearWatchdog();
+        // Something loaded, so whatever the last error was, it wasn't terminal.
+        corsRetried = false;
         MP.store.setPlayback({ isBuffering: false }, 'playback:state');
       });
     });
@@ -526,12 +603,17 @@
       // find out that the ACAO header didn't land.
       if (media.crossOrigin && !corsRetried) {
         corsRetried = true;
-        MP.dsp.disableCrossOrigin('media error code ' + code);
+        var failedSrc = media.currentSrc || media.src;
         var resumeAt = media.currentTime;
         media.removeAttribute('crossorigin');
         media.load();
         if (resumeAt > 0) media.currentTime = resumeAt;
         media.play().catch(function () {});
+        // Retry first, conclude second. The element reports the same error code
+        // for a CORS rejection, a 404 and a dead server, so blaming CORS on the
+        // code alone permanently disabled the effects chain whenever a stale
+        // streamURL failed to load. Ask the network directly instead.
+        confirmCorsFailure(failedSrc, code);
         return;
       }
 
@@ -599,6 +681,7 @@
     toggleFullscreen: toggleFullscreen,
     syncPriority: syncPriority,
     activeMedia: activeMedia,
+    reloadCurrent: reloadCurrent,
     bufferedEnd: bufferedEnd,
     isVideoActive: function () { return active === video; },
   };

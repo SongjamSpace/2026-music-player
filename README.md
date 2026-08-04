@@ -273,8 +273,9 @@ WebTorrent's per-torrent server. Only content that is still downloading goes thr
 the torrent path.
 
 Loopback HTTP rather than a custom `mp://` protocol, for three specific reasons: the
-CSP in `renderer/index.html` already allows `media-src http://127.0.0.1:*`, so
-nothing there has to change; `installStreamCorsHeaders()` already pins
+CSP in `renderer/index.html` already allows `media-src http://127.0.0.1:*` (it also
+now allows `connect-src`, so the renderer can ask the server directly why a load
+failed instead of guessing); `installStreamCorsHeaders()` already pins
 `Access-Control-Allow-Origin` onto loopback responses, which the DSP graph depends on
 because the renderer's origin over `file://` is the string `"null"`; and
 `fs.createReadStream({start, end})` is the well-trodden way to serve the HTTP 206
@@ -290,6 +291,13 @@ The bar for serving a file locally is *known* complete, never "probably": a loca
 for a partially written file would play silence or noise. `torrent.done` is O(1) and
 covers a finished album; individual files fall back to the memo the progress ticker
 already maintains.
+
+Media and cover art have separate concurrency budgets, not one shared pool. They
+shared one at first, which meant a screen full of art could take every slot and a
+media read would answer 503 — arriving at the renderer as a bare `MediaError`,
+indistinguishable from a real playback failure. Playback must never be able to lose
+a descriptor to a thumbnail. `range-check.js` saturates art and asserts a media read
+still gets served.
 
 ## Download speed
 
@@ -669,7 +677,21 @@ closing the context doesn't release it. So the media elements load with
 revocable), the main process forces `Access-Control-Allow-Origin: *` on the
 loopback stream servers, and before the real elements are ever touched a
 throwaway element is probed for signal. If any of that fails, `crossOrigin` is
-dropped, the result is remembered, and playback continues without effects.
+dropped and playback continues without effects.
+
+Nothing about that failure is remembered, and this is deliberate. `MediaError`
+cannot tell a cross-origin refusal from a 404, a 503 or an unplugged drive — they
+are all code 4 — so treating the code as proof of a CORS problem meant one
+unrelated load failure wrote `corsOk: false` to disk and killed the effects chain
+for every future launch, with nothing in the UI to undo it. That is much easier to
+hit now that a torrent can be archived and its `streamURL` go stale. So `corsOk`
+is only written by `confirmCorsFailure()` in `player.js`, which asks the network
+instead of the error code: a `cors` fetch of the same URL, and if that rejects, a
+`no-cors` one. Only *reachable under `no-cors`, refused under `cors`* implicates
+CORS. A failed probe is a runtime fact — it retries on the next track, up to three
+times a session, and the panel banner carries a **Try again** that reloads the
+current track so the element can be re-adopted with `crossorigin` set.
+
 Modules are disabled by setting neutral parameters rather than rewiring: a
 peaking biquad at 0 dB is exactly unity, so "off" is genuinely transparent.
 Reverb is the one exception — a convolver runs regardless of its output gain, so

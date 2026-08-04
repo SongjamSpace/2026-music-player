@@ -11,6 +11,8 @@
   var bandRefs = [];
   var presetSelect = null;
   var banner = null;
+  var bannerText = null;
+  var bannerRetry = null;
   var open = false;
   var selectedBand = 0;
   var params = {}; // key → { set } so external changes can refresh the inputs
@@ -421,6 +423,16 @@
 
     banner = el('div', 'dsp__banner');
     banner.hidden = true;
+    bannerText = el('span', 'dsp__banner-text');
+    bannerRetry = el('button', 'dsp__banner-retry');
+    bannerRetry.type = 'button';
+    bannerRetry.textContent = 'Try again';
+    bannerRetry.addEventListener('click', function () {
+      bannerRetry.disabled = true;
+      MP.dsp.retry();
+    });
+    banner.appendChild(bannerText);
+    banner.appendChild(bannerRetry);
     body.appendChild(banner);
 
     body.appendChild(buildDisplay());
@@ -850,17 +862,23 @@
 
   function updateAvailability() {
     if (!banner) return;
-    // `corsOk === false` is the only state that means "we tried and it failed".
+    // `failed` means "we tried and it did not work", not merely "not running".
     // Keying off isAvailable() instead cried wolf on every launch: the probe
     // can't run until something plays, so opening the panel first showed a red
     // failure banner for a chain that was simply not started yet.
-    if (s().corsOk !== false) {
+    var st = MP.dsp.status();
+    if (!st.failed) {
       banner.hidden = true;
-    } else {
-      banner.hidden = false;
-      banner.textContent =
-        'Audio effects are unavailable on this system — the stream could not be routed through the processor. Playback is unaffected.';
+      bannerRetry.disabled = false;
+      return;
     }
+    banner.hidden = false;
+    bannerRetry.disabled = !!st.probing;
+    // Say what actually happened. The old text asserted the machine could not do
+    // it, which was wrong in every case where a track had simply failed to load.
+    bannerText.textContent =
+      'Audio effects are not running' + (st.reason ? ' — ' + st.reason : '') +
+      '. Playback is unaffected.';
   }
 
   /** True when focus is inside the panel, so shortcuts.js can stand down. */

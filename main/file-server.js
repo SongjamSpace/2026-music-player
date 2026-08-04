@@ -73,13 +73,22 @@ function contentTypeFor(filePath) {
 }
 
 /**
- * Concurrency cap on open read streams.
+ * Concurrency caps on open read streams, counted separately per kind.
  *
  * The library is on an external drive; a renderer bug that opened a stream per row
- * would hold hundreds of file descriptors against a spinning USB disk. Two media
- * elements and a handful of images is the real working set, so this is generous.
+ * would hold hundreds of file descriptors against a spinning USB disk.
+ *
+ * Media and art get their own budget because they used to share one, and a screen
+ * full of cover art could then starve a media read — which surfaces as a 503 that
+ * the media element reports as an unhelpfully generic error. Playback must never
+ * be able to lose a slot to a thumbnail. Six covers the media working set with room
+ * to spare: Chromium opens two connections per element, and the DSP probe adds a
+ * second element on the first play of a session.
  */
-const MAX_CONCURRENT_STREAMS = 8;
+const MAX_MEDIA_STREAMS = 6;
+const MAX_ART_STREAMS = 6;
+// Kept for the existing check harness and as the overall descriptor ceiling.
+const MAX_CONCURRENT_STREAMS = MAX_MEDIA_STREAMS + MAX_ART_STREAMS;
 
 /**
  * Parse a single-range `Range` header.
@@ -136,7 +145,7 @@ function createFileServer({ resolveMedia, resolveArt }) {
 
   let server = null;
   let baseUrl = null;
-  let openStreams = 0;
+  const open = { media: 0, art: 0 };
 
   function deny(res, code, message) {
     res.writeHead(code, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
@@ -166,7 +175,7 @@ function createFileServer({ resolveMedia, resolveArt }) {
     return realTarget;
   }
 
-  async function serveFile(req, res, filePath, { immutable }) {
+  async function serveFile(req, res, filePath, { immutable, kind }) {
     let stat;
     try {
       stat = await fsp.stat(filePath);
@@ -209,7 +218,8 @@ function createFileServer({ resolveMedia, resolveArt }) {
       return res.end();
     }
 
-    if (openStreams >= MAX_CONCURRENT_STREAMS) {
+    const budget = kind === 'art' ? MAX_ART_STREAMS : MAX_MEDIA_STREAMS;
+    if (open[kind] >= budget) {
       res.writeHead(503, { 'Content-Type': 'text/plain', 'Retry-After': '1' });
       return res.end('too many concurrent reads');
     }
@@ -217,12 +227,12 @@ function createFileServer({ resolveMedia, resolveArt }) {
     res.writeHead(range ? 206 : 200, headers);
     if (size === 0) return res.end();
 
-    openStreams++;
+    open[kind]++;
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
-      openStreams--;
+      open[kind]--;
     };
 
     const stream = fs.createReadStream(filePath, { start, end });
@@ -282,14 +292,14 @@ function createFileServer({ resolveMedia, resolveArt }) {
       if (!loc) return deny(res, 404, 'unknown track');
       const filePath = await safeJoin(loc.root, loc.relPath);
       if (!filePath) return deny(res, 404, 'not found');
-      return serveFile(req, res, filePath, { immutable: false });
+      return serveFile(req, res, filePath, { immutable: false, kind: 'media' });
     }
 
     if (kind === 'art') {
       if (typeof resolveArt !== 'function') return deny(res, 404, 'no art');
       const filePath = resolveArt(id, segments[3]);
       if (!filePath) return deny(res, 404, 'unknown art');
-      return serveFile(req, res, filePath, { immutable: true });
+      return serveFile(req, res, filePath, { immutable: true, kind: 'art' });
     }
 
     return deny(res, 404, 'not found');
@@ -350,9 +360,21 @@ function createFileServer({ resolveMedia, resolveArt }) {
 
     /** For diagnostics and tests. */
     stats() {
-      return { listening: !!baseUrl, openStreams };
+      return {
+        listening: !!baseUrl,
+        openStreams: open.media + open.art,
+        openMedia: open.media,
+        openArt: open.art,
+      };
     },
   };
 }
 
-module.exports = { createFileServer, parseRange, contentTypeFor, MAX_CONCURRENT_STREAMS };
+module.exports = {
+  createFileServer,
+  parseRange,
+  contentTypeFor,
+  MAX_CONCURRENT_STREAMS,
+  MAX_MEDIA_STREAMS,
+  MAX_ART_STREAMS,
+};
