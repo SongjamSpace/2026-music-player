@@ -31,6 +31,15 @@ const CACHE = path.join(
 // renderer/js/albums.js is a browser IIFE hanging things off window.MP, so it
 // is evaluated here against a minimal stub rather than duplicated — a copy of
 // the rule in the test would only ever verify itself.
+/** Same element-wise compare albums.js uses, for asserting the order it produced. */
+function compareKeys(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
 function loadAlbums() {
   const src = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'js', 'albums.js'), 'utf8');
   const MEDIA = /\.(mp3|m4a|flac|ogg|oga|opus|aac|wav|mp4|m4v|webm|mkv|avi|mov)$/i;
@@ -93,7 +102,7 @@ async function main() {
   for (const f of files) {
     const parsed = await parseTorrent(fs.readFileSync(path.join(CACHE, f)));
     const torrent = { files: (parsed.files || []).map((x) => ({ name: x.name, path: x.path })) };
-    seen.push({ name: parsed.name || f, result: albums.group(torrent) });
+    seen.push({ name: parsed.name || f, files: torrent.files, result: albums.group(torrent) });
   }
 
   let failures = 0;
@@ -139,14 +148,98 @@ async function main() {
       console.log('  FAIL  ' + s.name.slice(0, 44) + ' — empty group');
       failures++;
     }
-    // Within an album, tracks must stay in file order — that is the running
-    // order of the record, and nothing above should have disturbed it.
+    // Within an album, tracks must come out in the running order their filenames
+    // describe. This used to assert plain file order; that was the bug — a torrent's
+    // file order is whatever the packager's filesystem returned, and one album
+    // arrived 03, 07, 08, 05, 01. Where the filenames make no claim, file order is
+    // still what must survive.
     for (const g of s.result.groups) {
-      const sorted = g.indices.slice().sort((a, b) => a - b);
-      if (String(sorted) !== String(g.indices)) {
-        console.log('  FAIL  ' + s.name.slice(0, 44) + ' — "' + g.name + '" tracks out of file order');
+      const keys = g.indices.map((i) => {
+        const f = s.files[i];
+        const key = albums.trackOrderKey(f.name || f.path.split('/').pop());
+        return { i, key, disc: albums.discNumber(f.path) };
+      });
+      const numbered = keys.filter((k) => k.key);
+      // Only meaningful when the album is numbered at all — see NUMBERED_QUORUM.
+      if (numbered.length >= Math.ceil(g.indices.length * (2 / 3))) {
+        for (let n = 1; n < numbered.length; n++) {
+          const prev = numbered[n - 1];
+          const cur = numbered[n];
+          const back =
+            cur.disc < prev.disc ||
+            (cur.disc === prev.disc && compareKeys(cur.key, prev.key) < 0);
+          if (back) {
+            console.log(
+              '  FAIL  ' + s.name.slice(0, 40) + ' — "' + g.name + '" goes backwards: ' +
+                prev.key.join('.') + ' then ' + cur.key.join('.')
+            );
+            failures++;
+            break;
+          }
+        }
+      } else {
+        const sorted = g.indices.slice().sort((a, b) => a - b);
+        if (String(sorted) !== String(g.indices)) {
+          console.log(
+            '  FAIL  ' + s.name.slice(0, 40) + ' — "' + g.name +
+              '" was reordered despite having no track numbers'
+          );
+          failures++;
+        }
+      }
+    }
+  }
+
+  // -- what counts as a track number ---------------------------------------
+  //
+  // The real library above proves the rule works on the releases at hand; these pin
+  // the edges it must not get wrong, which no torrent here happens to exercise.
+  {
+    const k = (name) => JSON.stringify(albums.trackOrderKey(name));
+    const cases = [
+      // The ordinary shapes.
+      ['03 Broke Zodiac.mp3', '[0,3]'],
+      ['05. CIRKLON3.flac', '[0,5]'],
+      ['01 - Xtal.flac', '[0,1]'],
+      ['[07] Stride Rite.mp3', '[0,7]'],
+      ['9) Something.mp3', '[0,9]'],
+      // Disc-track, and vinyl sides.
+      ['1-05 Title.flac', '[1,5]'],
+      ['2_11 Title.flac', '[2,11]'],
+      ['A1 Side Opener.mp3', '[1,1]'],
+      ['B2 - Second.mp3', '[2,2]'],
+      // A numeric field of its own, after the artist.
+      ['Gang Gang Dance - 08 - Retina Riddim.mp3', '[0,8]'],
+      ['Artist - Album - 12 - Title.mp3', '[0,12]'],
+      // Everything below must make no claim at all. A wrong guess here reorders a
+      // record that was already right, which is worse than leaving it alone.
+      ['1984 Overture.flac', 'null'],          // four digits is a year, not a track
+      ['2049 Blade.mp3', 'null'],
+      ['Miles Davis - Take 5.mp3', 'null'],    // a number inside a field
+      ['Blade Runner - 2049.mp3', 'null'],
+      ['99Luftballons.mp3', 'null'],           // no separator: part of the word
+      ['Untitled.mp3', 'null'],
+      ['', 'null'],
+      // Sanity: the number must lead, not merely appear.
+      ['Symphony No. 5 - I. Allegro.flac', 'null'],
+    ];
+    for (const [name, expected] of cases) {
+      const got = k(name);
+      if (got !== expected) {
+        console.log('  FAIL  trackOrderKey(' + JSON.stringify(name) + ') = ' + got + ', expected ' + expected);
         failures++;
       }
+    }
+    console.log('  PASS  ' + cases.length + ' track-number cases');
+
+    // A disc folder under the album orders ahead of the track number, or the second
+    // disc's 01 would interleave with the first disc's.
+    const d = (p) => albums.discNumber(p);
+    if (d('T/Album/CD2/01 x.flac') !== 2 || d('T/Album/01 x.flac') !== 0 || d('T/Album/Disc 3/x.flac') !== 3) {
+      console.log('  FAIL  discNumber');
+      failures++;
+    } else {
+      console.log('  PASS  disc folders are read from the path');
     }
   }
 

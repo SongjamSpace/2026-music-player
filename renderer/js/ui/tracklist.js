@@ -435,15 +435,23 @@
     // Only media is listed. Images become the album artwork, and everything
     // else — cue sheets, rip logs, .accurip/.toc checksums, readmes — is
     // packaging, not tracks.
+    var hidden = 0;
+    t.files.forEach(function (file) {
+      if (MP.util.isMediaFile(file) || MP.util.isImageFile(file)) return;
+      hidden++;
+    });
+
+    // Rows follow MP.albums.mediaOrder, not the file list. Walking `files` directly
+    // and dropping each row into its group made display order equal file order
+    // whatever grouping had decided — which is why an album whose files are in
+    // arbitrary order (03, 07, 08, 05, 01…) listed that way despite its filenames
+    // saying otherwise. This is the same order the play queue is built from.
     var ordinal = 0;
     var perGroup = new Map();
     var first = null;
-    var hidden = 0;
-    t.files.forEach(function (file, index) {
-      if (!MP.util.isMediaFile(file)) {
-        if (!MP.util.isImageFile(file)) hidden++;
-        return;
-      }
+    MP.albums.mediaOrder(t).forEach(function (index) {
+      var file = t.files[index];
+      if (!file) return;
       // Numbering restarts inside each album: the "#" column means the track's
       // place on that record, and counting to 221 across a discography says
       // nothing. Ungrouped lists stay contiguous exactly as before.

@@ -298,6 +298,37 @@ for a partially written file would play silence or noise. `torrent.done` is O(1)
 covers a finished album; individual files fall back to the memo the progress ticker
 already maintains.
 
+### Track order
+
+Album *grouping* reads folders; track order reads filenames. They are independent, and
+one album made that obvious: *Isn't It Now?* arrived `03, 07, 08, 05, 01…` because a
+torrent's file order is whatever the packager's filesystem happened to return. The
+filenames were the only statement of intent in the torrent, and nothing was reading
+them.
+
+`albums.js` derives a sort key from each filename and orders within each group by
+(disc folder, key, file index). Recognised: `05. Title`, `1-05 Title`, `A2 Title`, and
+a bare numeric field after the artist — `Gang Gang Dance - 08 - Retina Riddim`, which
+left a whole discography scrambled until it was handled.
+
+What it refuses to read as a track number matters more than what it accepts, because a
+wrong guess reorders a record that was already right:
+
+- four digits is a year (`1984 Overture`, `2049 Blade`), not a track;
+- a number inside a field is part of the title (`Miles Davis - Take 5`);
+- no separator means no claim (`99Luftballons`).
+
+Two safety properties. The sort is **stable**, so a torrent already in order comes out
+untouched — only demonstrably misplaced files move. And a group is reordered only if
+**two thirds** of its files claim a number and at least two claims differ; below that
+it keeps file order, which is what leaves an unnumbered release like Gang Gang Dance's
+`RAWWAR` alone instead of shuffling it.
+
+The track list renders from `mediaOrder()` rather than walking `files`. It used to do
+the latter and append each row into its group, which quietly made display order equal
+file order no matter what grouping decided — so the list, the `#` column and the play
+queue can no longer disagree.
+
 ### Damaged files
 
 There is one gap in that, and it has been hit. When the index is rebuilt from a
