@@ -539,7 +539,7 @@
         var file = t && t.files && t.files[p.fileIndex];
         var next = file && (file.localURL || file.streamURL);
         if (!next || next === failed) {
-          reportPlaybackError(media.error ? media.error.code : 0);
+          reportPlaybackError(media.error ? media.error.code : 0, media);
           return;
         }
         console.warn('[player] source failed, retrying from', next === file.localURL ? 'disk' : 'the swarm');
@@ -555,21 +555,43 @@
         media.play().catch(function () {});
       })
       .catch(function () {
-        reportPlaybackError(media.error ? media.error.code : 0);
+        reportPlaybackError(media.error ? media.error.code : 0, media);
       });
 
     return true;
   }
 
-  function reportPlaybackError(code) {
-    var message = ERROR_MESSAGES[code] || 'Playback failed.';
+  function reportPlaybackError(code, media) {
+    var p = pb();
+    var t = p.torrentId != null ? MP.store.getTorrent(p.torrentId) : null;
+    var file = t && t.files && t.files[p.fileIndex];
+    // A track that was playing and then failed partway through is a damaged file,
+    // not an unplayable format or a source that went away. The distinction matters
+    // because only one of the three has a fix, and it is one we can actually apply:
+    // the torrent's piece hashes know which bytes are wrong.
+    var wasPlaying = media && media.currentTime > 1;
+    var repairable = !!(file && file.localURL && wasPlaying);
+
+    var message = repairable
+      ? 'This track is damaged from about ' + MP.util.formatDuration(media.currentTime) +
+        ' — the file on disk is the right size but some of it never arrived.'
+      : ERROR_MESSAGES[code] || 'Playback failed.';
+
     MP.store.setPlayback({ isPlaying: false, isBuffering: false, error: message }, 'playback:state');
-    var torrentId = pb().torrentId;
-    MP.toast.error(message, {
-      action: torrentId
-        ? { label: 'Reveal in Finder', onClick: function () { MP.actions.openTorrentFolder(torrentId); } }
-        : null,
-    });
+
+    var action = null;
+    if (repairable) {
+      action = {
+        label: 'Re-download',
+        onClick: function () { MP.actions.repairTrack(p.torrentId, p.fileIndex); },
+      };
+    } else if (p.torrentId != null) {
+      action = {
+        label: 'Reveal in Finder',
+        onClick: function () { MP.actions.openTorrentFolder(p.torrentId, p.fileIndex); },
+      };
+    }
+    MP.toast.error(message, { action: action });
   }
 
   function attach(media) {
@@ -692,7 +714,7 @@
       // archived usually has a perfectly good file on disk to fall back to.
       if (recoverSource(media)) return;
 
-      reportPlaybackError(code);
+      reportPlaybackError(code, media);
     });
   }
 

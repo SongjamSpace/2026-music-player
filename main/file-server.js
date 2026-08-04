@@ -235,14 +235,31 @@ function createFileServer({ resolveMedia, resolveArt }) {
       open[kind]--;
     };
 
+    const expected = end - start + 1;
+    let sent = 0;
     const stream = fs.createReadStream(filePath, { start, end });
+    stream.on('data', (chunk) => {
+      sent += chunk.length;
+    });
     // A seek or a closed tab aborts the response; without this the descriptor
     // stays open against the external drive until GC gets round to it.
+    //
+    // A response that closes having sent less than Content-Length is reported.
+    // Chromium turns a short body into a bare MediaError — indistinguishable from
+    // a corrupt file — so without this line the only symptom of a truncated read
+    // is a track that stops partway through and blames its own format.
     res.on('close', () => {
       stream.destroy();
+      if (!res.writableFinished && sent < expected) {
+        console.warn(
+          '[file-server] short read:', path.basename(filePath),
+          'sent', sent, 'of', expected, 'bytes from offset', start
+        );
+      }
       release();
     });
-    stream.on('error', () => {
+    stream.on('error', (err) => {
+      console.warn('[file-server] read failed:', path.basename(filePath), '-', err.message);
       release();
       res.destroy();
     });

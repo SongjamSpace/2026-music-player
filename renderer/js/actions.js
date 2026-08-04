@@ -31,9 +31,31 @@
     });
   }
 
-  function openTorrentFolder(id) {
-    return window.playerAPI.openTorrentFolder(id).then(function (r) {
+  /** With a fileIndex, reveals and highlights that track; without, the album folder. */
+  function openTorrentFolder(id, fileIndex) {
+    return window.playerAPI.openTorrentFolder(id, fileIndex).then(function (r) {
       if (r && r.error) MP.toast.error('Could not open folder: ' + r.error);
+    });
+  }
+
+  /**
+   * Re-fetch one damaged track from the swarm.
+   *
+   * Only the torrent's piece hashes can tell good bytes from bad, so this marks the
+   * track unverified and puts the torrent back up — WebTorrent re-hashes the album
+   * and re-downloads only what fails. That hashing is real work against the drive,
+   * so the toast says so rather than looking like nothing happened.
+   */
+  function repairTrack(id, fileIndex) {
+    return window.playerAPI.repairTrack(id, fileIndex).then(function (r) {
+      if (r && r.error) {
+        MP.toast.error(r.error);
+        return;
+      }
+      MP.toast.show(
+        'Checking this album against the torrent and re-downloading the damaged part. ' +
+          'Verifying takes a while on an external drive.'
+      );
     });
   }
 
@@ -106,6 +128,7 @@
   window.MP.actions = {
     addMagnet: addMagnet,
     openTorrentFolder: openTorrentFolder,
+    repairTrack: repairTrack,
     openDownloadFolder: openDownloadFolder,
     removeTorrent: removeTorrent,
     seedAlbum: seedAlbum,

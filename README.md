@@ -298,6 +298,33 @@ for a partially written file would play silence or noise. `torrent.done` is O(1)
 covers a finished album; individual files fall back to the memo the progress ticker
 already maintains.
 
+### Damaged files
+
+There is one gap in that, and it has been hit. When the index is rebuilt from a
+cached `.torrent`, `verified` means only *a file of exactly the right length exists
+at that path* — see the note in `library-import.js`. It cannot mean more without
+hashing gigabytes off USB on every import, which is the boot cost the whole design
+exists to avoid. But a full-length file whose bytes were never written — a crash
+mid-write on exFAT, which has happened here — passes that test.
+
+The symptom is specific and was reported as something else entirely: a track plays
+perfectly and then dies partway through, always at the same place, and the player
+calls it an unsupported format. It isn't. `flac -t` on the file that prompted this
+reported `FRAME_CRC_MISMATCH after processing 12999168 samples` — 294.8 s in, which
+is exactly where playback stopped. The whole file was buffered by then, so nothing
+about the transport was involved.
+
+So `player.js` distinguishes a track that never started from one that stopped
+partway. The second offers **Re-download**, which clears `verified`, drops the
+album's cached modtimes and puts the torrent back up. Dropping the modtimes is
+load-bearing: that cache asserts "untouched since verified", and with it in place
+webtorrent skips hashing, calls the album complete and re-downloads nothing.
+
+The cost is honest but real: webtorrent's verification is per-album, so repairing
+one track re-hashes the whole album and the album reads as incomplete until that
+finishes. On a 6 GB discography over USB that is minutes, which is why the toast
+says so.
+
 Media and cover art have separate concurrency budgets, not one shared pool. They
 shared one at first, which meant a screen full of art could take every slot and a
 media read would answer 503 — arriving at the renderer as a bare `MediaError`,

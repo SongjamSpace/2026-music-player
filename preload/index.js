@@ -66,7 +66,11 @@ contextBridge.exposeInMainWorld('playerAPI', {
   rememberHomeNetwork: () => ipcRenderer.invoke('remember-home-network'),
   forgetHomeNetwork: () => ipcRenderer.invoke('forget-home-network'),
 
-  openTorrentFolder: (torrentId) => ipcRenderer.invoke('open-torrent-folder', torrentId),
+  // fileIndex is optional: with it, the track is revealed and highlighted; without
+  // it, the album folder is opened.
+  openTorrentFolder: (torrentId, fileIndex) =>
+    ipcRenderer.invoke('open-torrent-folder', torrentId, fileIndex),
+  repairTrack: (albumId, fileIndex) => ipcRenderer.invoke('repair-track', albumId, fileIndex),
   openDownloadFolder: () => ipcRenderer.invoke('open-download-folder'),
 
   onTorrentReady: subscribe('torrent-ready'),

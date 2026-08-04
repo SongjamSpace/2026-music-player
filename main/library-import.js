@@ -110,6 +110,14 @@ async function buildRecord({ cacheDir, publicId, downloadRoot, magnetURI }) {
     // Sparse preallocation means a partial file can already be full-length, so
     // size alone is not proof — but a *wrong* size is proof of the negative, which
     // is the direction that matters for deciding whether to serve it.
+    //
+    // The gap this leaves is real and has been hit: a file of exactly the right
+    // length whose bytes were never written plays until the damaged region and then
+    // dies, and the player cannot tell that from a format it does not support. Only
+    // the torrent's piece hashes can, and hashing 6 GB off USB on import is exactly
+    // the boot cost this design exists to avoid. So the import stays optimistic and
+    // `repair-track` in main/index.js is the way out: it clears this flag and lets
+    // webtorrent re-hash that one album on demand.
     const verified = st.exists && st.size === file.length;
     if (verified) presentBytes += file.length;
     return {

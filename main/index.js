@@ -1635,6 +1635,11 @@ ipcMain.handle('get-metrics', () => {
     // ever been added?
     library: library.stats(),
     artwork: artwork.stats(),
+    // Open read streams, per kind. Worth reporting because the failure it detects
+    // is invisible otherwise: a descriptor that is never released turns into a 503
+    // several minutes into a track, which the media element reports as a bare
+    // MediaError with no way to tell it from a bad file.
+    fileServer: fileServer.stats(),
     processes: processes,
   };
 });
@@ -1678,7 +1683,26 @@ ipcMain.handle('forget-home-network', () => {
   return { home: null };
 });
 
-ipcMain.handle('open-torrent-folder', async (event, torrentId) => {
+ipcMain.handle('open-torrent-folder', async (event, torrentId, fileIndex) => {
+  // Select the track itself when the caller knows which one. `showItemInFolder`
+  // opens the enclosing folder with the file highlighted, which for a 242-file
+  // discography is the difference between an answer and a starting point — opening
+  // the torrent root left the user looking at 20 album folders.
+  if (fileIndex != null) {
+    const record = library.get(torrentId);
+    const track = record && record.tracks.find((t, i) => (t.i != null ? t.i : i) === fileIndex);
+    if (record && record.root && track) {
+      const full = path.join(record.root, track.path);
+      try {
+        await fsp.access(full);
+        shell.showItemInFolder(full);
+        return { success: true };
+      } catch (_) {
+        /* gone from disk — fall through to the album folder */
+      }
+    }
+  }
+
   // Index fallback, for the same reason the file server has one: Reveal in Finder is
   // reachable from four places in the UI and would break for every archived album if
   // it could only ask a live torrent. The album folder is the first path segment of
@@ -1701,6 +1725,78 @@ ipcMain.handle('open-torrent-folder', async (event, torrentId) => {
   } catch (err) {
     return { error: err.message || String(err) };
   }
+});
+
+/**
+ * Re-fetch a track whose bytes are wrong, from the swarm.
+ *
+ * The index's `verified` flag only ever meant "a file of exactly the right length
+ * exists at that path" — see the note in library-import.js, which is explicit that
+ * size is not proof. It cannot be: the drive is exFAT over USB and this app has
+ * been force-quit mid-write more than once, which leaves a full-length file holding
+ * bytes that were never written. The symptom is a track that plays perfectly until
+ * the damaged region and then dies, which is indistinguishable to the player from a
+ * format it cannot handle.
+ *
+ * The only thing that can tell good bytes from bad is the torrent's piece hashes,
+ * so repair means: stop serving the file locally, then put the torrent back up.
+ * WebTorrent re-hashes what is on disk and re-downloads whatever fails — no
+ * separate repair machinery, and no re-downloading the other 6 GB.
+ *
+ * A second request for the same track is refused, and that refusal is the useful
+ * part. If the piece hashes accepted the file, every peer in the swarm holds these
+ * exact bytes and the damage is in the release itself — which is what happened the
+ * first time this ran. Offering the same button again would be an infinite loop
+ * dressed up as a fix.
+ */
+ipcMain.handle('repair-track', async (event, albumId, fileIndex) => {
+  const record = library.get(albumId);
+  if (!record) return { error: 'That album is not in the library.' };
+  const track = record.tracks.find((t, i) => (t.i != null ? t.i : i) === fileIndex);
+  if (!track) return { error: 'That track is not in the index.' };
+
+  if (track.repairedAt) {
+    return {
+      error:
+        'Already re-downloaded this track on ' + String(track.repairedAt).slice(0, 10) +
+        ' and the bytes match the torrent, so every peer has the same damaged file. ' +
+        'This one is broken in the release itself — a different copy is the only fix.',
+      permanent: true,
+    };
+  }
+
+  // Clearing `verified` is what stops the file server handing out a local URL for
+  // known-bad bytes, and what makes set-playback-state wake the album on the next
+  // attempt. `complete` goes with it: the album is no longer whole.
+  const tracks = record.tracks.map((t, i) =>
+    (t.i != null ? t.i : i) === fileIndex
+      ? Object.assign({}, t, { verified: false, repairedAt: new Date().toISOString() })
+      : t
+  );
+  await library.patch(albumId, {
+    tracks: tracks,
+    complete: false,
+    presentBytes: Math.max(0, (record.presentBytes || 0) - (track.length || 0)),
+    state: 'downloading',
+  });
+
+  // Load-bearing. The modtimes cache asserts "untouched since verified", which is
+  // the one claim that must be withdrawn here: with it in place webtorrent skips
+  // hashing entirely, reports the album complete and re-downloads nothing.
+  torrentService.forgetCachedModtimes(albumId);
+  if (record.realInfoHash) torrentService.forgetCachedModtimes(record.realInfoHash);
+
+  // If it is already live it was added under the old modtimes, so it has to come
+  // back down before it can be re-hashed.
+  if (torrentService.has(albumId)) await torrentManager.archive(albumId, 'repair');
+  const woke = await torrentManager.ensureLive(albumId, 'repairing a damaged track');
+  send('torrent-ready', albumToTorrentShape(library.get(albumId)));
+  console.log(
+    '[repair]', track.name, '- marked unverified;', woke ? 'torrent is up' : 'could not bring the torrent up'
+  );
+  return woke
+    ? { success: true, name: track.name }
+    : { error: 'Marked for repair, but the torrent could not be started.' };
 });
 
 ipcMain.handle('open-download-folder', async () => {

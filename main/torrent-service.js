@@ -169,6 +169,25 @@ class TorrentService {
     }
   }
 
+  /**
+   * Drop the modtimes cache for one album, forcing a full re-hash on the next add.
+   *
+   * The cache exists so a launch can skip SHA-1 over gigabytes of USB, and it works
+   * by asserting "these files are untouched since we verified them". That assertion
+   * is exactly what has to be withdrawn to repair a file whose bytes are wrong but
+   * whose length and mtime are not — otherwise webtorrent trusts the cache, reports
+   * the album complete, and re-downloads nothing.
+   */
+  forgetCachedModtimes(publicId) {
+    if (!this.cacheDir || !publicId) return false;
+    try {
+      fs.unlinkSync(this._modtimesPath(publicId));
+      return true;
+    } catch (_) {
+      return false; // never cached, or already gone
+    }
+  }
+
   _writeCachedModtimes(torrent, publicId) {
     if (!this.cacheDir || !torrent || typeof torrent.getFileModtimes !== 'function') return;
     torrent.getFileModtimes((err, modtimes) => {
